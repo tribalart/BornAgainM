@@ -1,8 +1,5 @@
-This project is a wip personnal learning project in collaboration with some IAs because i don't know coding at all.
-Its certainly full of stupid logics and obvious mistakes.
+This project is a WIP personal learning project, developed in collaboration with some AIs, because I don’t know how to code at all. It is certainly full of flawed logic and obvious mistakes.
 
-I did not modify any game datas, simply reading differents values to display online players, Hp, stats,
-and swap items slots in bank for the bank sorting.
+I did not modify any game data; I am only reading different values to display online players, HP, stats, and to swap item slots in the bank for bank sorting.
 
-I do not intend to brake the game, the players journey's or take any unfair advantage, 
-i just use BornAgain as a theme because i enjoy the game right now. thanks you.
+I do not intend to break the game, affect players’ journeys, or gain any unfair advantage. I am simply using BornAgain as a theme because I am enjoying the game at the moment. Thank you.
