@@ -1,0 +1,492 @@
+using System;
+using System.Linq;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using MelonLoader;
+using UnityEngine;
+using Il2Cpp;
+using Il2CppZero.Game.Shared;
+using HarmonyLib;
+using Il2CppInterop.Runtime;
+using Il2CppRonin.Model.Simulation;
+using Il2CppRonin.Model.Data;
+using Il2CppRonin.Model.Simulation.Components;
+using Il2CppRonin.Model.Structs;
+using Il2CppRonin.Model.Enums;
+
+[assembly: MelonInfo(typeof(BornAgainM.Core), "BornAgainM", "2.0.6", "Toi")]
+[assembly: MelonGame("Unnamed Studios", "Born Again")]
+
+namespace BornAgainM
+{
+    public class Core : MelonMod
+    {
+        private bool sortingInProgress = false;
+        private bool stopRequested = false;
+
+        private bool isRecording = false;
+        private float startTime;
+        private const float DPS_DURATION = 20f;
+
+        private readonly Dictionary<uint, PlayerDPS> players = new();
+        private readonly HashSet<uint> processedAttacks = new();
+
+        [HarmonyPatch(typeof(Il2Cpp.MerchantSlot), "SetItem")]
+        public class MerchantSlotPatch
+        {
+            public static bool isEnabled = false;
+            public static ushort customItemType = 1098;
+            public static long customPrice = 1;
+
+            static void Prefix(Il2Cpp.MerchantSlot __instance, ref ItemValue itemValue, ref long cost)
+            {
+                if (isEnabled)
+                {
+                    itemValue = new ItemValue(customItemType, 1);
+                    cost = customPrice;
+                    MelonLogger.Msg($"Intercepted SetItem - Replaced with Type: {customItemType}, Price: {customPrice}");
+                }
+            }
+        }
+
+        private class AttackInfo
+        {
+            public int Damage;
+            public bool IsTrueDamage;
+            public uint TargetsHit;
+            public float Time;
+
+            // Nouvelles infos
+            public string AttackType;
+            public int MinDamage;
+            public int MaxDamage;
+            public int ArmorDamage;
+            public bool Pierces;
+            public float Radius;
+            public float Speed;
+            public string WeaponName;
+        }
+
+        private class PlayerDPS
+        {
+            public string Name;
+            public uint OwnerId;
+            public List<AttackInfo> Attacks = new();
+
+            public int TotalDamage => Attacks.Sum(a => a.Damage);
+            public int HitCount => Attacks.Count;
+            public int MaxHit => Attacks.Count > 0 ? Attacks.Max(a => a.Damage) : 0;
+            public int MinHit => Attacks.Count > 0 ? Attacks.Min(a => a.Damage) : 0;
+            public double AvgHit => Attacks.Count > 0 ? Attacks.Average(a => a.Damage) : 0;
+            public int TrueDamageCount => Attacks.Count(a => a.IsTrueDamage);
+            public int TrueDamageTotal => Attacks.Where(a => a.IsTrueDamage).Sum(a => a.Damage);
+           
+
+
+        }
+
+        public override void OnInitializeMelon()
+        {
+            MelonLogger.Msg("Bank Sorter Loaded (toggle with NumKey6)");
+            MelonLogger.Msg("DPS Meter Loaded (toggle with NumKey+)");
+            
+          //  HarmonyInstance.PatchAll();
+        }
+
+        public override void OnUpdate()
+        {
+            if (Input.GetKeyDown(KeyCode.Keypad6))
+            {
+                if (sortingInProgress)
+                {
+                    stopRequested = true;
+                    MelonLogger.Msg("Stop requested, finishing current swaps...");
+                }
+                else
+                {
+                    MelonLogger.Msg("Starting bank sort...");
+                    sortingInProgress = true;
+                    stopRequested = false;
+                    SortBankAsync().Forget();
+                }
+            }
+            if (Input.GetKeyDown(KeyCode.Keypad3))
+            {
+                MelonLogger.Msg("===Keypad3 ShowLocalCharacterInfo ===");
+                ShowLocalCharacterInfo();
+            }
+
+            if (Input.GetKeyDown(KeyCode.KeypadPlus))
+            {
+                if (!isRecording)
+                    StartDPS();
+                else
+                    StopDPS();
+            }
+
+            if (Input.GetKeyDown(KeyCode.KeypadDivide))
+            {
+                //ModifyMerchantItems();
+            }
+        }
+
+        public override void OnLateUpdate()
+        {
+            if (!isRecording) return;
+
+            if (Time.time - startTime >= DPS_DURATION)
+            {
+                StopDPS();
+                return;
+            }
+
+            CaptureAttacks();
+
+         
+        }
+
+        private async Task SortBankAsync()
+        {
+            const int startIndex = 0;
+            var controller = UnityEngine.Object.FindObjectOfType<Il2Cpp.SlotController>();
+            if (controller == null)
+            {
+                MelonLogger.Msg("SlotController not found");
+                sortingInProgress = false;
+                return;
+            }
+
+            int currentIndex = startIndex;
+
+            while (!stopRequested)
+            {
+                var slots = UnityEngine.Object.FindObjectsOfType<Il2Cpp.Slot>()
+                    .Where(s => s.Index >= currentIndex)
+                    .OrderBy(s => s.Index)
+                    .ToArray();
+
+                if (slots.Length == 0)
+                    break;
+
+                var itemTypes = slots
+                    .Select(s => s.GetItemValue())
+                    .Where(i => i.Count > 0)
+                    .Select(i => i.Type)
+                    .Distinct()
+                    .OrderBy(t => t)
+                    .ToArray();
+
+                bool swappedAnything = false;
+
+                foreach (var type in itemTypes)
+                {
+                    if (stopRequested) break;
+
+                    slots = UnityEngine.Object.FindObjectsOfType<Il2Cpp.Slot>()
+                        .Where(s => s.Index >= currentIndex)
+                        .OrderBy(s => s.Index)
+                        .ToArray();
+
+                    var itemsOfType = slots
+                        .Select(s => new { Slot = s, Item = s.GetItemValue() })
+                        .Where(x => x.Item.Type == type)
+                        .OrderBy(x => x.Slot.Index)
+                        .ToList();
+
+                    foreach (var pair in itemsOfType)
+                    {
+                        if (stopRequested) break;
+
+                        var targetSlot = slots.FirstOrDefault(s => s.Index == currentIndex);
+                        if (targetSlot == null) continue;
+
+                        if (pair.Slot.Index != targetSlot.Index)
+                        {
+                            controller.Swap(pair.Slot, targetSlot);
+                            MelonLogger.Msg($"Swapped Slot {pair.Slot.Index} with Slot {targetSlot.Index} (ItemType {type})");
+                            swappedAnything = true;
+                            await Task.Delay(UnityEngine.Random.Range(320, 420));
+                        }
+
+                        currentIndex++;
+                    }
+                }
+
+                if (!swappedAnything) break;
+            }
+
+            sortingInProgress = false;
+            stopRequested = false;
+            MelonLogger.Msg("Bank sort completed!");
+        }
+
+        private void StartDPS()
+        {
+            isRecording = true;
+            startTime = Time.time;
+            players.Clear();
+            processedAttacks.Clear();
+
+            MelonLogger.Msg("=== DPS / COMBAT METER STARTED ===");
+            PostChat("=== DPS STARTED for 20 Sec ===");
+        }
+
+        private void CaptureAttacks()
+        {
+            var sim = World.Instance?.Simulation;
+            if (sim == null) return;
+
+            var localPlayer = GameObject.FindObjectOfType<Character>();
+            if (localPlayer == null) return;
+            long localPlayerId = localPlayer.PlayerId;
+
+            var type = Il2CppSystem.Type.GetTypeFromHandle(Il2CppType.Of<Simulation>().TypeHandle);
+            var field = type.GetField("_attacks",
+                (Il2CppSystem.Reflection.BindingFlags)((int)Il2CppSystem.Reflection.BindingFlags.NonPublic | (int)Il2CppSystem.Reflection.BindingFlags.Instance)
+            );
+
+            var array = field?.GetValue(sim)?.Cast<Il2CppSystem.Array>();
+            if (array == null) return;
+
+            for (int i = 0; i < array.Length; i++)
+            {
+                var atk = array.GetValue(i)?.Cast<LiveAttack>();
+                if (atk == null) continue;
+                if (atk.Id == 0 || processedAttacks.Contains(atk.Id)) continue;
+                if (atk.Damage <= 0) continue;
+
+                var character = GameObject.FindObjectsOfType<Character>()
+                    .FirstOrDefault(c => c.EntityId == atk.OwnerId);
+
+                if (character != null && character.PlayerId == localPlayerId)
+                {
+                    var descriptor = atk.AttackDescriptor;
+
+                    var attackInfo = new AttackInfo
+                    {
+                        Damage = atk.Damage,
+                        IsTrueDamage = atk.TrueDamage,
+                        TargetsHit = (uint)(atk.Hits?.Count ?? 0),
+                        Time = Time.time,
+                        
+
+                        // Nouvelles données
+                        AttackType = descriptor?.Type.ToString() ?? "Unknown",
+                        MinDamage = descriptor?.MinDamage ?? 0,
+                        MaxDamage = descriptor?.MaxDamage ?? 0,
+                        ArmorDamage = descriptor?.ArmorDamage ?? 0,
+                        Pierces = descriptor?.Pierces ?? false,
+                        Radius = descriptor?.Radius ?? 0f,
+                        Speed = descriptor?.Speed ?? 0f,
+                        WeaponName = descriptor?.Origin.ToString() ?? "Unkown",
+
+                    };
+
+                    RegisterAttack(atk.OwnerId, attackInfo);
+                    processedAttacks.Add(atk.Id);
+                }
+            }
+        }
+
+        private void RegisterAttack(uint ownerId, AttackInfo attackInfo)
+        {
+            if (!players.TryGetValue(ownerId, out var p))
+            {
+                var character = GameObject.FindObjectsOfType<Character>()
+                    .FirstOrDefault(c => c.EntityId == ownerId);
+                string name = character != null
+                    ? (!string.IsNullOrEmpty(character.EntityName) ? character.EntityName : $"Player_{character.PlayerId}")
+                    : $"Entity_{ownerId}";
+
+                p = new PlayerDPS { Name = name, OwnerId = ownerId };
+                players[ownerId] = p;
+            }
+
+            p.Attacks.Add(attackInfo);
+        }
+
+        private void StopDPS()
+        {
+            isRecording = false;
+            float duration = Time.time - startTime;
+
+
+            var playerData = players.Values.FirstOrDefault();
+
+            if (playerData != null && playerData.Attacks.Count > 0)
+            {
+                float dps = playerData.TotalDamage / duration;
+
+                PostChat(
+                $" {playerData.OwnerId} | DPS: {dps:F2} | Total: {playerData.TotalDamage}"
+                );
+
+                PostChat(
+                $"Hits: {playerData.HitCount} |  Min: {playerData.MinHit} | Max: {playerData.MaxHit} | Avg: {playerData.AvgHit:F1}"
+                );
+
+                // True Damage
+                if (playerData.TrueDamageCount > 0)
+                {
+                    PostChat($"True Dmg: {playerData.TrueDamageTotal} ({playerData.TrueDamageCount} hits)");
+                }
+
+                // Types d'attaques utilisés
+                var attackTypes = playerData.Attacks.GroupBy(a => a.AttackType);
+                
+                foreach (var typeGroup in attackTypes)
+                {
+                    var count = typeGroup.Count();
+                    var totalDmg = typeGroup.Sum(a => a.Damage);
+                    PostChat($"{typeGroup.Key}: {count} hits, {totalDmg} dmg");
+                }
+
+                // Attaques perçantes
+                var piercingHits = playerData.Attacks.Count(a => a.Pierces);
+                if (piercingHits > 0)
+                {
+                    PostChat($"Piercing attacks: {piercingHits}");
+                }
+
+                // Multi-target
+                var multiTargetAttacks = playerData.Attacks.Where(a => a.TargetsHit > 1).ToList();
+                if (multiTargetAttacks.Count > 0)
+                {
+                    PostChat($"Multi-target: {multiTargetAttacks.Count} hits");
+
+                }
+            }
+            else
+            {
+                PostChat("No damage dealt");
+            }
+
+           
+
+            // Log dans la console MelonLoader aussi
+            MelonLogger.Msg("DPS Meter stopped - Results posted in game chat");
+        }
+
+        private void PostChat(string message)
+        {
+            var chatContainer = GameObject.FindObjectOfType<ChatContainer>();
+            if (chatContainer == null) return;
+
+            try
+            {
+                var chat = new Chat(
+                    ChatType.Information,
+                    message,
+                    BadgeType.None,
+                    new Il2CppSystem.Nullable<int>(),
+                    new Il2CppSystem.Nullable<ChatOwnerData>(),
+                    new Il2CppSystem.Nullable<ChatIdData>(),
+                    RankType.Admin,
+                    (ushort)0
+                );
+
+                chatContainer.AddChat(chat);
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Error($"Erreur PostChat: {ex.Message}");
+            }
+        }
+
+        private void ShowLocalCharacterInfo()
+        {
+            MelonLogger.Msg("=== Searching for Characters ===");
+
+            var characters = GameObject.FindObjectsOfType<Character>();
+            if (characters == null || characters.Length == 0)
+            {
+                MelonLogger.Msg("No Character found in scene.");
+                return;
+            }
+
+            MelonLogger.Msg($"Found {characters.Length} Character objects");
+
+            var chatContainer = GameObject.FindObjectOfType<ChatContainer>();
+            var allCharactersInfo = new List<string>();
+
+            foreach (var c in characters)
+            {
+                if (c == null)
+                    continue;
+
+                string name = "Unknown";
+                int health = -1;
+                int maxHealth = -1;
+
+                // --- EntityId / PlayerId (les plus sûrs)
+                try
+                {
+                    name = $"Entity_{c.EntityId}";
+                }
+                catch { }
+
+                try
+                {
+                    if (c.PlayerId > 0)
+                        name = $"Player_{c.PlayerId}";
+                }
+                catch { }
+
+                // --- EntityName (dangereux → try isolé)
+                try
+                {
+                    if (!string.IsNullOrEmpty(c.EntityName))
+                        name = c.EntityName;
+                }
+                catch { }
+
+                // --- Health (dangereux)
+                try
+                {
+                    health = c.Health;
+                }
+                catch { }
+
+                // --- MaxHealth (TRÈS dangereux)
+                try
+                {
+                    if (c._maxHealth != null)
+                        maxHealth = c._maxHealth.Value;
+                }
+                catch { }
+
+                string logMessage = $"{name}  hp : {health}/{maxHealth}";
+                MelonLogger.Msg(logMessage);
+
+                allCharactersInfo.Add($"[{name} {health}/{maxHealth}]");
+            }
+
+            // Affichage sur UNE SEULE ligne dans le chat
+            if (chatContainer != null && allCharactersInfo.Count > 0)
+            {
+                string combinedMessage = $"Characters: {string.Join("   ", allCharactersInfo)}";
+
+                var chat = new Chat(
+                    ChatType.PartyChat,
+                    combinedMessage,
+                    BadgeType.None,
+                    new Il2CppSystem.Nullable<int>(),
+                    new Il2CppSystem.Nullable<ChatOwnerData>(),
+                    new Il2CppSystem.Nullable<ChatIdData>(),
+                    RankType.Admin,
+                    (ushort)0
+                );
+
+                chatContainer.AddChat(chat);
+            }
+
+            MelonLogger.Msg("=== End of Character list ===");
+        }
+
+    }
+    // Extension method de niveau supérieur
+    static class TaskExtensions
+        {
+            public static void Forget(this Task t) { }
+        }
+    }
