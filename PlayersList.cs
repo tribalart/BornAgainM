@@ -84,11 +84,9 @@ namespace BornAgainM
                 float verticalSpacing = 50f;
                 int maxRowsPerColumn = 10;
 
-                // Déterminer le nombre de colonnes nécessaires
                 int totalPlayers = characters.Length;
                 int numColumns = (totalPlayers + maxRowsPerColumn - 1) / maxRowsPerColumn;
 
-                // Ajuster la position du panel en fonction du nombre de colonnes
                 var panelRect = livePanel.GetComponent<RectTransform>();
                 if (numColumns == 1)
                 {
@@ -128,11 +126,9 @@ namespace BornAgainM
                             continue;
                         }
 
-                        // Position de base
                         int column = index / maxRowsPerColumn;
                         int row = index % maxRowsPerColumn;
 
-                        // Décalage horizontal basé sur le nombre total de colonnes
                         float baseXOffset = 0f;
                         if (numColumns == 1)
                         {
@@ -153,7 +149,6 @@ namespace BornAgainM
                         var rect = uiElement.GetComponent<RectTransform>();
                         rect.anchoredPosition = new Vector2(xPos, yPos);
 
-                        // Récupérer les vraies valeurs depuis la HealthBar
                         int currentHP = c.Health;
                         int maxHP = currentHP;
                         int shield = 0;
@@ -186,11 +181,9 @@ namespace BornAgainM
                             }
                         }
 
-                        // Calcul des ratios
                         float hpRatio = maxHP > 0 ? Mathf.Clamp01((float)currentHP / maxHP) : 0f;
                         float shieldRatio = maxHP > 0 ? Mathf.Clamp01((float)shield / maxHP) : 0f;
 
-                        // Mettre à jour la barre HP (rouge)
                         var hpBar = uiElement.transform.Find("HPBar")?.GetComponent<Image>();
                         if (hpBar != null)
                         {
@@ -198,7 +191,6 @@ namespace BornAgainM
                             hpBarRect.sizeDelta = new Vector2(109f * hpRatio, 8f);
                         }
 
-                        // Mettre à jour la barre Shield (bleue)
                         var shieldBar = uiElement.transform.Find("ShieldBar")?.GetComponent<Image>();
                         if (shieldBar != null)
                         {
@@ -215,7 +207,6 @@ namespace BornAgainM
                             }
                         }
 
-                        // Mettre à jour le texte HP
                         var hpText = uiElement.transform.Find("HPText")?.GetComponent<Text>();
                         if (hpText != null)
                         {
@@ -225,7 +216,6 @@ namespace BornAgainM
                                 hpText.text = $"{currentHP}/{maxHP}";
                         }
 
-                        // Mettre à jour le nom
                         var nameText = uiElement.transform.Find("NameText")?.GetComponent<Text>();
                         if (nameText != null)
                         {
@@ -235,15 +225,13 @@ namespace BornAgainM
                             nameText.text = displayName;
                         }
 
-                        // NOUVEAU : Mettre à jour les dégâts
+                        // AJOUT: Damage dealt affiché correctement
                         var damageText = uiElement.transform.Find("DamageText")?.GetComponent<Text>();
                         if (damageText != null)
                         {
                             int damageDealt = 0;
-                            if (Core.playerDamage.ContainsKey(entityId))
-                            {
+                            if (Core.playerDamage != null && Core.playerDamage.ContainsKey(entityId))
                                 damageDealt = Core.playerDamage[entityId];
-                            }
                             damageText.text = $"DMG: {damageDealt}";
                         }
 
@@ -266,7 +254,7 @@ namespace BornAgainM
                             UnityEngine.Object.Destroy(element);
                         }
                         playerUIElements.Remove(id);
-                        Core.playerDamage.Remove(id); // NOUVEAU : Nettoyer les dégâts
+                        if (Core.playerDamage != null) Core.playerDamage.Remove(id); // Nettoyer les dégâts
                     }
                     catch (Exception ex)
                     {
@@ -388,7 +376,7 @@ namespace BornAgainM
             shieldBarImg.raycastTarget = false;
             shieldBarObj.SetActive(false);
 
-            // NOUVEAU : Texte Damage
+            // Texte Damage
             var damageTextObj = new GameObject("DamageText");
             damageTextObj.transform.SetParent(container.transform, false);
             var damageTextRect = damageTextObj.AddComponent<RectTransform>();
@@ -426,7 +414,6 @@ namespace BornAgainM
                 ? "Live Player UI enabled"
                 : "Live Player UI disabled");
 
-            // Flush stats si l'UI est désactivée
             if (!liveUiVisible)
                 PlayersStats.FlushIfUIInactive();
         }
