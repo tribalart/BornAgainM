@@ -16,6 +16,7 @@ using Il2CppRonin.Model.Simulation.Components;
 using Il2CppRonin.Model.Structs;
 using Il2CppRonin.Model.Enums;
 using System.Runtime.InteropServices;
+using System.Reflection;
 
 [assembly: MelonInfo(typeof(BornAgainM.Core), "BornAgainM", "2.0.8", "Toi")]
 [assembly: MelonGame("Unnamed Studios", "Born Again")]
@@ -24,8 +25,7 @@ namespace BornAgainM
 {
     public class Core : MelonMod
     {
-        private bool sortingInProgress = false;
-        private bool stopRequested = false;
+        private SortBank sortBank;
 
         private bool isRecording = false;
         private float startTime;
@@ -33,23 +33,25 @@ namespace BornAgainM
         private readonly HashSet<uint> processedAttacks = new();
         private readonly Dictionary<uint, PlayerDPS> players = new();
         private PlayersListUI playersListUI;
+        private DamageMeterUI damageMeterUI;
 
-        // Dictionnaire pour stocker les dégâts de chaque joueur (public static pour le patch)
         public static Dictionary<uint, int> playerDamage = new Dictionary<uint, int>();
+       
 
+ 
 
-        // NOUVEAU : Patch pour tracker les dégâts
+        // Patch pour tracker les dégâts
         [HarmonyPatch(typeof(WorldObject))]
         [HarmonyPatch(nameof(WorldObject.WorldMessageDamage))]
         public class WorldMessageDamagePatch
         {
             static void Postfix(
                 WorldObject __instance,
-            int damage,
-            bool fromPlayer,
-            bool isPlayer,
-            bool trueDamage,
-            bool criticalStrike
+                int damage,
+                bool fromPlayer,
+                bool isPlayer,
+                bool trueDamage,
+                bool criticalStrike
             )
             {
                 if (__instance == null || __instance.Pointer == IntPtr.Zero)
@@ -58,7 +60,6 @@ namespace BornAgainM
                 if (damage <= 0)
                     return;
 
-                
                 Character character = __instance.TryCast<Character>();
                 if (character == null)
                     return;
@@ -70,7 +71,6 @@ namespace BornAgainM
 
                 playerDamage[entityId] += damage;
             }
-
         }
 
 
@@ -79,13 +79,13 @@ namespace BornAgainM
 
 
 
-    private class AttackInfo
+
+        private class AttackInfo
         {
             public int Damage;
             public bool IsTrueDamage;
             public uint TargetsHit;
             public float Time;
-
             public string AttackType;
             public int MinDamage;
             public int MaxDamage;
@@ -113,10 +113,14 @@ namespace BornAgainM
 
         public override void OnInitializeMelon()
         {
-            MelonLogger.Msg("Bank Sorter Loaded (toggle with NumKey6)");
+        
             MelonLogger.Msg("DPS Meter Loaded (toggle with NumKey+)");
             MelonLogger.Msg("Live Player UI (toggle with NumKeyDivide)");
+            damageMeterUI = new DamageMeterUI();
+            damageMeterUI.CreateUI();
 
+
+            sortBank = new SortBank();
             playersListUI = new PlayersListUI();
 
             // Appliquer les patches Harmony
@@ -127,28 +131,16 @@ namespace BornAgainM
 
         public override void OnUpdate()
         {
-            if (Input.GetKeyDown(KeyCode.Keypad6))
-            {
-                if (sortingInProgress)
-                {
-                    stopRequested = true;
-                    MelonLogger.Msg("Stop requested, finishing current swaps...");
-                }
-                else
-                {
-                    MelonLogger.Msg("Starting bank sort...");
-                    sortingInProgress = true;
-                    stopRequested = false;
-                    MelonCoroutines.Start(SortBankCoroutine());
-                }
-            }
-            if (Input.GetKeyDown(KeyCode.Keypad3))
-            {
-                new BankManager();
-            }
 
+            // Toggle avec F6
+            if (Input.GetKeyDown(KeyCode.F6))
+                damageMeterUI.Toggle();
 
+            // Reset avec F7
+            if (Input.GetKeyDown(KeyCode.F8))
+                LiveAttackDamage.ResetStats();
 
+            damageMeterUI.UpdateUI();
 
             if (Input.GetKeyDown(KeyCode.KeypadPlus))
             {
@@ -162,6 +154,7 @@ namespace BornAgainM
             {
                 playersListUI.ToggleLivePlayerUI();
             }
+         
 
             if (PlayersListUIState.liveCanvas != null && PlayersListUIState.liveCanvas.activeSelf)
             {
@@ -180,82 +173,6 @@ namespace BornAgainM
 
         public override void OnLateUpdate()
         {
-        }
-
-        // ------------------- BANK SORT COROUTINE -------------------
-        private IEnumerator SortBankCoroutine()
-        {
-            const int startIndex = 0;
-            var controller = UnityEngine.Object.FindObjectOfType<Il2Cpp.SlotController>();
-            if (controller == null)
-            {
-                MelonLogger.Msg("SlotController not found");
-                sortingInProgress = false;
-                yield break;
-            }
-
-            int currentIndex = startIndex;
-
-            while (!stopRequested)
-            {
-                var slots = UnityEngine.Object.FindObjectsOfType<Il2Cpp.Slot>()
-                    .Where(s => s.Index >= currentIndex)
-                    .OrderBy(s => s.Index)
-                    .ToArray();
-
-                if (slots.Length == 0)
-                    break;
-
-                var itemTypes = slots
-                    .Select(s => s.GetItemValue())
-                    .Where(i => i.Count > 0)
-                    .Select(i => i.Type)
-                    .Distinct()
-                    .OrderBy(t => t)
-                    .ToArray();
-
-                bool swappedAnything = false;
-
-                foreach (var type in itemTypes)
-                {
-                    if (stopRequested) break;
-
-                    slots = UnityEngine.Object.FindObjectsOfType<Il2Cpp.Slot>()
-                        .Where(s => s.Index >= currentIndex)
-                        .OrderBy(s => s.Index)
-                        .ToArray();
-
-                    var itemsOfType = slots
-                        .Select(s => new { Slot = s, Item = s.GetItemValue() })
-                        .Where(x => x.Item.Type == type)
-                        .OrderBy(x => x.Slot.Index)
-                        .ToList();
-
-                    foreach (var pair in itemsOfType)
-                    {
-                        if (stopRequested) break;
-
-                        var targetSlot = slots.FirstOrDefault(s => s.Index == currentIndex);
-                        if (targetSlot == null) continue;
-
-                        if (pair.Slot.Index != targetSlot.Index)
-                        {
-                            controller.Swap(pair.Slot, targetSlot);
-                            MelonLogger.Msg($"Swapped Slot {pair.Slot.Index} with Slot {targetSlot.Index} (ItemType {type})");
-                            swappedAnything = true;
-                            yield return new WaitForSeconds(UnityEngine.Random.Range(0.25f, 0.30f));
-                        }
-
-                        currentIndex++;
-                    }
-                }
-
-                if (!swappedAnything) break;
-            }
-
-            sortingInProgress = false;
-            stopRequested = false;
-            MelonLogger.Msg("Bank sort completed!");
         }
 
         private void StartDPS()
@@ -315,7 +232,6 @@ namespace BornAgainM
                             IsTrueDamage = atk.TrueDamage,
                             TargetsHit = (uint)(atk.Hits?.Count ?? 0),
                             Time = Time.time,
-
                             AttackType = descriptor?.Type.ToString() ?? "Unknown",
                             MinDamage = descriptor?.MinDamage ?? 0,
                             MaxDamage = descriptor?.MaxDamage ?? 0,

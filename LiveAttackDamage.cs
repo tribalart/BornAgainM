@@ -10,6 +10,7 @@ using System.Linq;
 using Text = UnityEngine.UI.Text;
 using Image = UnityEngine.UI.Image;
 using Il2CppZero.Game.Shared;
+using static Il2CppSystem.Net.Http.Headers.Parser;
 
 namespace BornAgainM
 {
@@ -21,6 +22,39 @@ namespace BornAgainM
         public static HashSet<IntPtr> CountedAttacks = new HashSet<IntPtr>();
         private static uint startTime = 0;
         private static Vec2 targetCoordinate;
+
+        // Noms des boss
+        private static readonly HashSet<string> BossNames = new HashSet<string>
+        {
+            "Phoenix",
+            "Hahn",
+            "Forest Guardian",
+            "Mountain Dragon",
+            "Yuki Ba",
+            "Boghnin",
+            "Umbra",
+            "Vika-Minci",
+            "Grug-Mant",
+            "Pirate Captain",
+            "Kitsune Momoke",
+            "Giant Boar",
+            "Mysterious Head",
+            "Lord Hammurabi",
+            "Lord Cicero",
+            "Queoti Queen",
+            "Sand Eater",
+            "Pogger Beast Tamer",
+            "Giant Gloop",
+           "Saint Klaus",
+           "Wapo Helmsman",
+           "Gorilla King",
+           "Akuji Mozuki",
+           "Kobukin King",
+           "Akuji Saikami",
+           "Hill Giant Shaman",
+           "Dokai Chancellor",
+           "Stone Giant"
+        };
 
         static void Prefix(LiveAttack __instance)
         {
@@ -37,10 +71,12 @@ namespace BornAgainM
                 ushort damage = __instance.Damage;
                 bool trueDamage = __instance.TrueDamage;
 
+                // Filtre pour éviter les attaques vides ou répétées
                 if (__instance.Hits == null || __instance.Hits.Count == 0 ||
                     (__instance.StartTime == startTime && targetCoordinate == __instance.TargetCoordinates))
                     return;
 
+                // Cherche l'attaquant
                 var characters = GameObject.FindObjectsOfType<Character>();
                 var character = characters.FirstOrDefault(c => c.EntityId == ownerId);
                 if (character == null)
@@ -48,25 +84,20 @@ namespace BornAgainM
 
                 string name = character.EntityName;
 
-                // Récupérer les noms des cibles touchées
-                List<string> targetNames = new List<string>();
-                var entities = GameObject.FindObjectsOfType<Il2Cpp.Entity>();
+                // Vérifie si c'est un boss
+                bool isBoss = BossNames.Contains(name);
+                if (!isBoss)
+                    return; // On ignore tout ce qui n'est pas un boss
 
-                foreach (uint targetId in __instance.Hits)
-                {
-                    var target = entities.FirstOrDefault(e => e.EntityId == targetId);
-                    targetNames.Add(target != null ? target.EntityName : $"ID:{targetId}");
-                }
-                string targetsStr = string.Join(", ", targetNames);
-
+                // Mettre à jour le dictionnaire des dégâts
                 if (!AttackInfoDict.ContainsKey(name))
                 {
                     AttackInfoDict[name] = new Dictionary<string, object>
-                    {
-                        { "TotalDamage", 0 },
-                        { "TotalTrueDamage", 0 },
-                        { "HitsCount", 0 }
-                    };
+            {
+                { "TotalDamage", 0 },
+                { "TotalTrueDamage", 0 },
+                { "HitsCount", 0 }
+            };
                 }
 
                 startTime = __instance.StartTime;
@@ -75,6 +106,16 @@ namespace BornAgainM
                 AttackInfoDict[name]["TotalTrueDamage"] = (int)AttackInfoDict[name]["TotalTrueDamage"] + (trueDamage ? damage : 0);
                 AttackInfoDict[name]["HitsCount"] = (int)AttackInfoDict[name]["HitsCount"] + 1;
 
+                // Si tu veux construire les targets pour le log, tu peux le faire **après avoir validé que c'est un boss**
+                List<string> targetNames = new List<string>();
+                var entities = GameObject.FindObjectsOfType<Il2Cpp.Entity>();
+                foreach (uint targetId in __instance.Hits)
+                {
+                    var target = entities.FirstOrDefault(e => e.EntityId == targetId);
+                    targetNames.Add(target != null ? target.EntityName : $"ID:{targetId}");
+                }
+                string targetsStr = string.Join(", ", targetNames);
+
                 MelonLogger.Msg($"[Attack] {name} -> {targetsStr}: {damage} dmg (Total: {AttackInfoDict[name]["TotalDamage"]}, Hits: {AttackInfoDict[name]["HitsCount"]})");
             }
             catch (Exception ex)
@@ -82,6 +123,7 @@ namespace BornAgainM
                 MelonLogger.Error($"[LiveAttackDispose] Error: {ex.Message}");
             }
         }
+
 
         public static void ResetStats()
         {
@@ -93,11 +135,12 @@ namespace BornAgainM
 
     internal class DamageMeterUI
     {
-        public static bool isVisible = false;
+        public static bool isVisible = true;
         private static GameObject canvas;
         private static GameObject panel;
         private Dictionary<string, GameObject> entityUIElements = new Dictionary<string, GameObject>();
         private Font cachedFont;
+        private const int MAX_PLAYERS = 10;
 
         public void CreateUI()
         {
@@ -127,7 +170,7 @@ namespace BornAgainM
                 panelRect.sizeDelta = new Vector2(220f, 400f);
 
                 var panelBg = panel.AddComponent<Image>();
-                panelBg.color = new Color(0.05f, 0.05f, 0.1f, 0.55f);
+                panelBg.color = new Color(0.05f, 0.05f, 0.1f, 0f);
                 panelBg.raycastTarget = false;
 
                 cachedFont = Resources.GetBuiltinResource<Font>("Arial.ttf");
@@ -161,7 +204,7 @@ namespace BornAgainM
             titleText.color = new Color(1f, 0.8f, 0.2f, 1f);
             titleText.alignment = TextAnchor.MiddleCenter;
             titleText.fontStyle = FontStyle.Bold;
-            titleText.text = "F6 toogle // F7 reset";
+            titleText.text = "F6 toggle // F8 reset";
             titleText.raycastTarget = false;
 
             var outline = titleObj.AddComponent<Outline>();
@@ -182,9 +225,15 @@ namespace BornAgainM
 
                 var currentNames = new HashSet<string>();
 
+                // Trier et limiter à 10
                 var sortedEntities = LiveAttackDamage.AttackInfoDict
                     .OrderByDescending(x => (int)x.Value["TotalDamage"])
+                    .Take(MAX_PLAYERS)
                     .ToList();
+
+                // Calculer le total des dégâts de tous les joueurs
+                int totalAllDamage = LiveAttackDamage.AttackInfoDict
+                    .Sum(x => (int)x.Value["TotalDamage"]);
 
                 foreach (var kvp in sortedEntities)
                 {
@@ -210,19 +259,24 @@ namespace BornAgainM
                     int totalDmg = (int)kvp.Value["TotalDamage"];
                     int trueDmg = (int)kvp.Value["TotalTrueDamage"];
                     int hits = (int)kvp.Value["HitsCount"];
-                    int avg = totalDmg + trueDmg / hits;
+                    int avg = hits > 0 ? ((totalDmg + trueDmg) / hits) : 0;
+
+                    // Calculer le pourcentage
+                    float percentage = totalAllDamage > 0 ? (float)totalDmg / totalAllDamage * 100f : 0f;
 
                     var nameText = uiElement.transform.Find("NameText")?.GetComponent<Text>();
                     if (nameText != null)
                     {
-                        string displayName = name.Length > 15 ? name.Substring(0, 13) + ".." : name;
-                        nameText.text = displayName;
+                        string displayName = name.Length > 12 ? name.Substring(0, 10) + ".." : name;
+                        // Ajouter numéro et pourcentage
+                        nameText.text = $"{index + 1}) {displayName}";
                     }
 
                     var dmgText = uiElement.transform.Find("DamageText")?.GetComponent<Text>();
                     if (dmgText != null)
                     {
-                        dmgText.text = $"{totalDmg}";
+                        // Afficher dégâts + pourcentage
+                        dmgText.text = $"{totalDmg} ({percentage:F1}%)";
                     }
 
                     var detailText = uiElement.transform.Find("DetailText")?.GetComponent<Text>();
@@ -244,6 +298,7 @@ namespace BornAgainM
                     index++;
                 }
 
+                // Supprimer les éléments hors top 10 ou obsolètes
                 var toRemove = entityUIElements.Keys.Except(currentNames).ToList();
                 foreach (var name in toRemove)
                 {
@@ -287,7 +342,7 @@ namespace BornAgainM
             nameRect.anchorMax = new Vector2(0f, 1f);
             nameRect.pivot = new Vector2(0f, 1f);
             nameRect.anchoredPosition = new Vector2(5f, -3f);
-            nameRect.sizeDelta = new Vector2(120f, 14f);
+            nameRect.sizeDelta = new Vector2(100f, 14f);
 
             var nameText = nameObj.AddComponent<Text>();
             if (cachedFont != null) nameText.font = cachedFont;
@@ -304,11 +359,11 @@ namespace BornAgainM
             dmgRect.anchorMax = new Vector2(1f, 1f);
             dmgRect.pivot = new Vector2(1f, 1f);
             dmgRect.anchoredPosition = new Vector2(-5f, -2f);
-            dmgRect.sizeDelta = new Vector2(70f, 16f);
+            dmgRect.sizeDelta = new Vector2(95f, 16f);
 
             var dmgText = dmgObj.AddComponent<Text>();
             if (cachedFont != null) dmgText.font = cachedFont;
-            dmgText.fontSize = 13;
+            dmgText.fontSize = 11;
             dmgText.color = new Color(1f, 0.4f, 0.3f, 1f);
             dmgText.alignment = TextAnchor.UpperRight;
             dmgText.fontStyle = FontStyle.Bold;
