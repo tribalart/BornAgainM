@@ -25,6 +25,7 @@ namespace BornAgainM
 {
     public class Core : MelonMod
     {
+
         private SortBank sortBank;
 
         private bool isRecording = false;
@@ -32,13 +33,17 @@ namespace BornAgainM
         private const float DPS_DURATION = 20f;
         private readonly HashSet<uint> processedAttacks = new();
         private readonly Dictionary<uint, PlayerDPS> players = new();
-        private PlayersListUI playersListUI;
         private DamageMeterUI damageMeterUI;
-
+        private static PlayersListUI playersListUI;
+        private int initdamaMeterUI = 0;
         public static Dictionary<uint, int> playerDamage = new Dictionary<uint, int>();
-       
 
- 
+        // MODIFICATION ICI POUR ACCÈS GLOBAL
+        public static void ToggleLivePlayerUI()
+        {
+            playersListUI?.ToggleLivePlayerUI();
+        }
+
 
         // Patch pour tracker les dégâts
         [HarmonyPatch(typeof(WorldObject))]
@@ -70,15 +75,9 @@ namespace BornAgainM
                     playerDamage[entityId] = 0;
 
                 playerDamage[entityId] += damage;
+
             }
         }
-
-
-
-
-
-
-
 
         private class AttackInfo
         {
@@ -109,11 +108,12 @@ namespace BornAgainM
             public double AvgHit => Attacks.Count > 0 ? Attacks.Average(a => a.Damage) : 0;
             public int TrueDamageCount => Attacks.Count(a => a.IsTrueDamage);
             public int TrueDamageTotal => Attacks.Where(a => a.IsTrueDamage).Sum(a => a.Damage);
+
         }
 
         public override void OnInitializeMelon()
         {
-        
+
             MelonLogger.Msg("DPS Meter Loaded (toggle with NumKey+)");
             MelonLogger.Msg("Live Player UI (toggle with NumKeyDivide)");
             damageMeterUI = new DamageMeterUI();
@@ -132,13 +132,9 @@ namespace BornAgainM
         public override void OnUpdate()
         {
 
-            // Toggle avec F6
-            if (Input.GetKeyDown(KeyCode.F6))
+            if (initdamaMeterUI == 0)
                 damageMeterUI.Toggle();
-
-            // Reset avec F7
-            if (Input.GetKeyDown(KeyCode.F8))
-                LiveAttackDamage.ResetStats();
+            initdamaMeterUI = 1;
 
             damageMeterUI.UpdateUI();
 
@@ -154,7 +150,7 @@ namespace BornAgainM
             {
                 playersListUI.ToggleLivePlayerUI();
             }
-         
+
 
             if (PlayersListUIState.liveCanvas != null && PlayersListUIState.liveCanvas.activeSelf)
             {
