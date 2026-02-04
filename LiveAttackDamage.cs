@@ -30,13 +30,13 @@ namespace BornAgainM
             "Hahn",
             "Forest Guardian",
             "Mountain Dragon",
-            "Yuki Ba",
-            "Boghnin",
+            "Yoku-Ba",
+            "Bhognin",
             "Umbra",
             "Vika-Minci",
             "Grug-Mant",
             "Pirate Captain",
-            "Kitsune Momoke",
+            "Kitsune Momoko",
             "Giant Boar",
             "Mysterious Head",
             "Lord Hammurabi",
@@ -53,7 +53,9 @@ namespace BornAgainM
            "Akuji Saikami",
            "Hill Giant Shaman",
            "Dokai Chancellor",
-           "Stone Giant"
+           "Stone Giant",
+            "Lady Valeria",
+            "Tiko Tikatu"
         };
 
         static void Prefix(LiveAttack __instance)
@@ -83,13 +85,14 @@ namespace BornAgainM
                     return;
 
                 string name = character.EntityName;
+                MelonLogger.Msg(character.EntityName);
+             
 
-                // Vérifie si c'est un boss
-                bool isBoss = BossNames.Contains(name);
-                if (!isBoss)
-                    return; // On ignore tout ce qui n'est pas un boss
 
-                // Mettre à jour le dictionnaire des dégâts
+
+
+
+
                 if (!AttackInfoDict.ContainsKey(name))
                 {
                     AttackInfoDict[name] = new Dictionary<string, object>
@@ -99,6 +102,20 @@ namespace BornAgainM
                 { "HitsCount", 0 }
             };
                 }
+                List<string> targetNames = new List<string>();
+                var entities = GameObject.FindObjectsOfType<Il2Cpp.Entity>();
+                foreach (uint targetId in __instance.Hits)
+                {
+                    var target = entities.FirstOrDefault(e => e.EntityId == targetId);
+                    bool isBoss = BossNames.Contains(target.EntityName);
+                    if (!isBoss)
+                        return;
+
+
+                    targetNames.Add(target != null ? target.EntityName : $"ID:{targetId}");
+
+                }
+                string targetsStr = string.Join(", ", targetNames);
 
                 startTime = __instance.StartTime;
                 targetCoordinate = __instance.TargetCoordinates;
@@ -107,15 +124,7 @@ namespace BornAgainM
                 AttackInfoDict[name]["HitsCount"] = (int)AttackInfoDict[name]["HitsCount"] + 1;
 
                 // Si tu veux construire les targets pour le log, tu peux le faire **après avoir validé que c'est un boss**
-                List<string> targetNames = new List<string>();
-                var entities = GameObject.FindObjectsOfType<Il2Cpp.Entity>();
-                foreach (uint targetId in __instance.Hits)
-                {
-                    var target = entities.FirstOrDefault(e => e.EntityId == targetId);
-                    targetNames.Add(target != null ? target.EntityName : $"ID:{targetId}");
-                }
-                string targetsStr = string.Join(", ", targetNames);
-
+   
                 MelonLogger.Msg($"[Attack] {name} -> {targetsStr}: {damage} dmg (Total: {AttackInfoDict[name]["TotalDamage"]}, Hits: {AttackInfoDict[name]["HitsCount"]})");
             }
             catch (Exception ex)
