@@ -51,7 +51,7 @@ namespace BornAgainM
             "Akuji Mozuki", "Kobukin King", "Akuji Saikami", "Hill Giant Shaman",
             "Dokai Chancellor", "Stone Giant", "Lady Valeria", "Tiko Tikatu",
             "Shroom Conglomerate", "Onyx", "Bullfrog Shaman", "Hydra Head",
-            "Mounted Knight"
+            "Mounted Knight", "Djinn"
         };
 
         static void Prefix(LiveAttack __instance)
