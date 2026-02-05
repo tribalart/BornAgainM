@@ -150,7 +150,7 @@ namespace BornAgainM
             {
                 playersListUI.ToggleLivePlayerUI();
             }
-
+           
 
             if (PlayersListUIState.liveCanvas != null && PlayersListUIState.liveCanvas.activeSelf)
             {

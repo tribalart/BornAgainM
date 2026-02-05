@@ -11,6 +11,8 @@ using Text = UnityEngine.UI.Text;
 using Image = UnityEngine.UI.Image;
 using Il2CppZero.Game.Shared;
 using UnityEngine.Events;
+using Il2CppRonin.Model.Classes;
+using Il2CppRonin.Model.Enums;
 
 namespace BornAgainM
 {
@@ -18,9 +20,22 @@ namespace BornAgainM
     [HarmonyPatch(nameof(LiveAttack.Dispose))]
     internal class LiveAttackDamage
     {
+        // Structure améliorée pour tracker les stats par boss et joueur
+        public class PlayerDamageStats
+        {
+            public int TotalDamage = 0;           // Tous les dégâts (direct + DoT)
+            public int DirectDamage = 0;          // Dégâts directs seulement
+            public int DoTDamage = 0;             // Damage over time seulement
+            public int CritDamage = 0;            // Dégâts provenant de coups critiques
+            public int TrueDamage = 0;            // Dégâts de true damage
+            public int HitsCount = 0;             // Nombre total de hits
+            public int DirectHits = 0;            // Nombre de hits directs
+            public int DoTHits = 0;               // Nombre de ticks de DoT
+        }
+
         // Structure: [BossName][PlayerName] = stats
-        public static Dictionary<string, Dictionary<string, Dictionary<string, object>>> BossAttackInfoDict =
-            new Dictionary<string, Dictionary<string, Dictionary<string, object>>>();
+        public static Dictionary<string, Dictionary<string, PlayerDamageStats>> BossAttackInfoDict =
+            new Dictionary<string, Dictionary<string, PlayerDamageStats>>();
 
         public static HashSet<IntPtr> CountedAttacks = new HashSet<IntPtr>();
         private static uint startTime = 0;
@@ -28,40 +43,14 @@ namespace BornAgainM
 
         private static readonly HashSet<string> BossNames = new HashSet<string>
         {
-            "Phoenix",
-            "Hahn",
-            "Forest Guardian",
-            "Mountain Dragon",
-            "Yoku-Ba",
-            "Bhognin",
-            "Umbra",
-            "Vika-Minci",
-            "Grug-Mant",
-            "Pirate Captain",
-            "Kitsune Momoko",
-            "Giant Boar",
-            "Mysterious Head",
-            "Lord Hammurabi",
-            "Lord Cicero",
-            "Queoti Queen",
-            "Sand Eater",
-            "Pogger Beast Tamer",
-            "Giant Gloop",
-            "Saint Klaus",
-            "Wapo Helmsman",
-            "Gorilla King",
-            "Akuji Mozuki",
-            "Kobukin King",
-            "Akuji Saikami",
-            "Hill Giant Shaman",
-            "Dokai Chancellor",
-            "Stone Giant",
-            "Lady Valeria",
-            "Tiko Tikatu",
-            "Shroom Conglomerate",
-            "Onyx",
-            "Bullfrog Shaman",
-            "Hydra Head",
+            "Phoenix", "Hahn", "Forest Guardian", "Mountain Dragon", "Yoku-Ba",
+            "Bhognin", "Umbra", "Vika-Minci", "Grug-Mant", "Pirate Captain",
+            "Kitsune Momoko", "Giant Boar", "Mysterious Head", "Lord Hammurabi",
+            "Lord Cicero", "Queoti Queen", "Sand Eater", "Pogger Beast Tamer",
+            "Giant Gloop", "Saint Klaus", "Wapo Helmsman", "Gorilla King",
+            "Akuji Mozuki", "Kobukin King", "Akuji Saikami", "Hill Giant Shaman",
+            "Dokai Chancellor", "Stone Giant", "Lady Valeria", "Tiko Tikatu",
+            "Shroom Conglomerate", "Onyx", "Bullfrog Shaman", "Hydra Head",
             "Mounted Knight"
         };
 
@@ -79,6 +68,7 @@ namespace BornAgainM
                 uint ownerId = __instance.OwnerId;
                 ushort damage = __instance.Damage;
                 bool trueDamage = __instance.TrueDamage;
+                AttackFlags flags = __instance.Flags;
 
                 if (__instance.Hits == null || __instance.Hits.Count == 0 ||
                     (__instance.StartTime == startTime && targetCoordinate == __instance.TargetCoordinates))
@@ -107,37 +97,110 @@ namespace BornAgainM
                     // Créer l'entrée pour ce boss si elle n'existe pas
                     if (!BossAttackInfoDict.ContainsKey(bossName))
                     {
-                        BossAttackInfoDict[bossName] = new Dictionary<string, Dictionary<string, object>>();
+                        BossAttackInfoDict[bossName] = new Dictionary<string, PlayerDamageStats>();
                     }
 
                     // Créer l'entrée pour ce joueur contre ce boss
                     if (!BossAttackInfoDict[bossName].ContainsKey(attackerName))
                     {
-                        BossAttackInfoDict[bossName][attackerName] = new Dictionary<string, object>
-                        {
-                            { "TotalDamage", 0 },
-                            { "TotalTrueDamage", 0 },
-                            { "HitsCount", 0 }
-                        };
+                        BossAttackInfoDict[bossName][attackerName] = new PlayerDamageStats();
                     }
 
                     startTime = __instance.StartTime;
                     targetCoordinate = __instance.TargetCoordinates;
 
-                    BossAttackInfoDict[bossName][attackerName]["TotalDamage"] =
-                        (int)BossAttackInfoDict[bossName][attackerName]["TotalDamage"] + damage;
-                    BossAttackInfoDict[bossName][attackerName]["TotalTrueDamage"] =
-                        (int)BossAttackInfoDict[bossName][attackerName]["TotalTrueDamage"] + (trueDamage ? damage : 0);
-                    BossAttackInfoDict[bossName][attackerName]["HitsCount"] =
-                        (int)BossAttackInfoDict[bossName][attackerName]["HitsCount"] + 1;
+                    var stats = BossAttackInfoDict[bossName][attackerName];
 
-                    MelonLogger.Msg($"[Attack] {attackerName} -> {bossName}: {damage} dmg (Total: {BossAttackInfoDict[bossName][attackerName]["TotalDamage"]})");
+                    // Analyse des flags
+                    bool isCrit = (flags & AttackFlags.CriticalStrike) != 0;
+                    bool isTrueDmg = (flags & AttackFlags.TrueDamage) != 0;
+                    bool isBlocked = (flags & AttackFlags.Blocked) != 0;
+
+                    // Déterminer si c'est un DoT (Damage over Time)
+                    // Les DoT peuvent être identifiés par les StatusEffects (burn, poison, bleed)
+                    bool isDoT = false;
+
+                    AttackDescriptor descriptor = __instance.AttackDescriptor;
+                    if (descriptor != null)
+                    {
+                        // Vérifier les effets de statut "on hit" pour les DoT
+                        var onHitEffects = descriptor.OnHitStatusEffects;
+                        if (onHitEffects != null && onHitEffects.Count > 0)
+                        {
+                            // Les DoT ont généralement des status effects persistants
+                            // On peut aussi vérifier le type d'attaque
+                            isDoT = true; // Si l'attaque applique des status effects, c'est probablement un DoT
+                        }
+
+                        // Alternative: vérifier les noms d'effets
+                        string effectName = descriptor.Effect?.ToLower() ?? "";
+                        string trailName = descriptor.Trail?.ToLower() ?? "";
+
+                        // Patterns communs pour les DoT
+                        if (effectName.Contains("burn") || effectName.Contains("poison") ||
+                            effectName.Contains("bleed") || effectName.Contains("dot") ||
+                            trailName.Contains("burn") || trailName.Contains("poison") ||
+                            trailName.Contains("bleed") || trailName.Contains("dot"))
+                        {
+                            isDoT = true;
+                        }
+                    }
+
+                    // Mise à jour des statistiques
+                    stats.TotalDamage += damage;
+                    stats.HitsCount++;
+
+                    if (isDoT)
+                    {
+                        stats.DoTDamage += damage;
+                        stats.DoTHits++;
+                    }
+                    else
+                    {
+                        stats.DirectDamage += damage;
+                        stats.DirectHits++;
+                    }
+
+                    // Important: un coup peut être à la fois crit ET true damage
+                    // On les compte séparément pour calculer les %
+                    if (isCrit)
+                    {
+                        stats.CritDamage += damage;
+                    }
+
+                    if (isTrueDmg || trueDamage)
+                    {
+                        stats.TrueDamage += damage;
+                    }
+
+                    // Log détaillé avec flags
+                    string flagsStr = GetFlagsString(flags, isDoT);
+                    string dotIndicator = isDoT ? " [DoT]" : "";
+                    MelonLogger.Msg($"[Attack] {attackerName} -> {bossName}: {damage} dmg{dotIndicator} | Flags: {flagsStr} | Total: {stats.TotalDamage} (Direct: {stats.DirectDamage}, DoT: {stats.DoTDamage}) | Crit%: {(stats.TotalDamage > 0 ? (float)stats.CritDamage / stats.TotalDamage * 100f : 0f):F1}%");
                 }
             }
             catch (Exception ex)
             {
                 MelonLogger.Error($"[LiveAttackDispose] Error: {ex.Message}");
             }
+        }
+
+        // Méthode helper pour convertir les flags en string lisible
+        private static string GetFlagsString(AttackFlags flags, bool isDoT = false)
+        {
+            List<string> flagList = new List<string>();
+
+            if (isDoT)
+                flagList.Add("DoT");
+
+            if ((flags & AttackFlags.CriticalStrike) != 0)
+                flagList.Add("Crit");
+            if ((flags & AttackFlags.TrueDamage) != 0)
+                flagList.Add("True");
+            if ((flags & AttackFlags.Blocked) != 0)
+                flagList.Add("Blocked");
+
+            return flagList.Count > 0 ? string.Join(" | ", flagList) : "Normal";
         }
 
         public static void ResetStats()
@@ -154,10 +217,10 @@ namespace BornAgainM
         private static GameObject canvas;
         private static GameObject panel;
         private static GameObject buttonCanvas;
-        private static GameObject toggleButton; // Référence au bouton toggle pour changer sa couleur
+        private static GameObject toggleButton;
         private Dictionary<string, Dictionary<string, GameObject>> bossUIElements =
-            new Dictionary<string, Dictionary<string, GameObject>>(); // [BossName][PlayerName] = GameObject
-        private Dictionary<string, GameObject> bossHeaders = new Dictionary<string, GameObject>(); // Headers pour chaque boss
+            new Dictionary<string, Dictionary<string, GameObject>>();
+        private Dictionary<string, GameObject> bossHeaders = new Dictionary<string, GameObject>();
         private Font cachedFont;
         private const int MAX_PLAYERS = 10;
 
@@ -186,7 +249,7 @@ namespace BornAgainM
                 panelRect.anchorMax = new Vector2(1f, 0.5f);
                 panelRect.pivot = new Vector2(1f, 0.5f);
                 panelRect.anchoredPosition = new Vector2(-30f, 100f);
-                panelRect.sizeDelta = new Vector2(600f, 400f); // Plus large pour 3 colonnes
+                panelRect.sizeDelta = new Vector2(600f, 400f);
 
                 var panelBg = panel.AddComponent<Image>();
                 panelBg.color = new Color(0.05f, 0.05f, 0.1f, 0f);
@@ -225,23 +288,21 @@ namespace BornAgainM
             containerRect.anchorMin = new Vector2(1f, 0.5f);
             containerRect.anchorMax = new Vector2(1f, 0.5f);
             containerRect.pivot = new Vector2(1f, 0.5f);
-            containerRect.anchoredPosition = new Vector2(-60f, 300f); // Décalé de 30px vers la gauche
-            containerRect.sizeDelta = new Vector2(300f, 30f); // Plus large pour 3 boutons
+            containerRect.anchoredPosition = new Vector2(-60f, 300f);
+            containerRect.sizeDelta = new Vector2(300f, 30f);
 
             float yButtonOffset = 25f;
-            // Bouton Toggle (change de couleur selon l'état)
+
             toggleButton = CreateButton("ToggleBtn", "Toggle DPS", new Vector2(-100f, yButtonOffset), new Color(0.2f, 0.5f, 0.8f, 1f));
             toggleButton.transform.SetParent(buttonContainer.transform, false);
             var toggleButtonComp = toggleButton.GetComponent<Button>();
             toggleButtonComp.onClick.AddListener((UnityAction)OnToggleClick);
 
-            // Bouton Reset
             var resetBtn = CreateButton("ResetBtn", "Reset", new Vector2(0f, yButtonOffset), new Color(0.8f, 0.3f, 0.2f, 1f));
             resetBtn.transform.SetParent(buttonContainer.transform, false);
             var resetButton = resetBtn.GetComponent<Button>();
             resetButton.onClick.AddListener((UnityAction)OnResetClick);
 
-            // Bouton Players UI
             var playersBtn = CreateButton("PlayersBtn", "Players", new Vector2(100f, yButtonOffset), new Color(0.5f, 0.3f, 0.8f, 1f));
             playersBtn.transform.SetParent(buttonContainer.transform, false);
             var playersButton = playersBtn.GetComponent<Button>();
@@ -325,15 +386,7 @@ namespace BornAgainM
 
         private void OnPlayersClick()
         {
-            try
-            {
-                // Appeler la méthode ToggleLivePlayerUI de PlayersListUI
-                Core.ToggleLivePlayerUI();
-            }
-            catch (Exception ex)
-            {
-                MelonLogger.Error($"Error toggling Players UI: {ex.Message}");
-            }
+            Core.ToggleLivePlayerUI();
         }
 
         private void UpdateToggleButtonColor()
@@ -344,7 +397,6 @@ namespace BornAgainM
             var btnImg = toggleButton.GetComponent<Image>();
             if (btnImg != null)
             {
-                // Vert si actif (visible), Bleu si inactif
                 btnImg.color = isVisible
                     ? new Color(0.2f, 0.8f, 0.3f, 1f)  // Vert
                     : new Color(0.2f, 0.5f, 0.8f, 1f); // Bleu
@@ -359,7 +411,7 @@ namespace BornAgainM
             try
             {
                 var activeBosses = LiveAttackDamage.BossAttackInfoDict.Keys.ToList();
-                int bossCount = Math.Min(activeBosses.Count, 3); // Max 3 colonnes
+                int bossCount = Math.Min(activeBosses.Count, 3);
 
                 float columnWidth = 190f;
                 float columnSpacing = 10f;
@@ -390,7 +442,6 @@ namespace BornAgainM
                     string bossName = activeBosses[bossIndex];
                     float columnX = startX + (bossIndex * (columnWidth + columnSpacing));
 
-                    // Créer ou mettre à jour le header du boss
                     if (!bossHeaders.ContainsKey(bossName))
                     {
                         bossHeaders[bossName] = CreateBossHeader(bossName);
@@ -407,7 +458,6 @@ namespace BornAgainM
                         headerText.text = displayBossName;
                     }
 
-                    // Créer le dictionnaire pour ce boss si nécessaire
                     if (!bossUIElements.ContainsKey(bossName))
                     {
                         bossUIElements[bossName] = new Dictionary<string, GameObject>();
@@ -415,14 +465,14 @@ namespace BornAgainM
 
                     var playerStats = LiveAttackDamage.BossAttackInfoDict[bossName];
                     var sortedPlayers = playerStats
-                        .OrderByDescending(x => (int)x.Value["TotalDamage"])
+                        .OrderByDescending(x => x.Value.TotalDamage)
                         .Take(MAX_PLAYERS)
                         .ToList();
 
-                    int totalBossDamage = playerStats.Sum(x => (int)x.Value["TotalDamage"]);
+                    int totalBossDamage = playerStats.Sum(x => x.Value.TotalDamage);
 
                     float yStart = -35f;
-                    float verticalSpacing = 35f; // Réduit car pas de barre rouge
+                    float verticalSpacing = 38f; // Augmenté pour afficher le taux de crit
 
                     var currentPlayers = new HashSet<string>();
 
@@ -448,10 +498,20 @@ namespace BornAgainM
                         var rect = uiElement.GetComponent<RectTransform>();
                         rect.anchoredPosition = new Vector2(columnX, yStart - playerIndex * verticalSpacing);
 
-                        int totalDmg = (int)kvp.Value["TotalDamage"];
-                        int trueDmg = (int)kvp.Value["TotalTrueDamage"];
-                        int hits = (int)kvp.Value["HitsCount"];
-                        int avg = hits > 0 ? ((totalDmg + trueDmg) / hits) : 0;
+                        var stats = kvp.Value;
+                        int totalDmg = stats.TotalDamage;
+                        int directDmg = stats.DirectDamage;
+                        int dotDmg = stats.DoTDamage;
+                        int critDmg = stats.CritDamage;
+                        int trueDmg = stats.TrueDamage;
+                        int hits = stats.HitsCount;
+
+                        int avg = hits > 0 ? (totalDmg / hits) : 0;
+
+                        // Calculer les pourcentages de crit et true damage par rapport au total
+                        float critPercent = totalDmg > 0 ? ((float)critDmg / totalDmg * 100f) : 0f;
+                        float truePercent = totalDmg > 0 ? ((float)trueDmg / totalDmg * 100f) : 0f;
+                        float dotPercent = totalDmg > 0 ? ((float)dotDmg / totalDmg * 100f) : 0f;
 
                         float percentage = totalBossDamage > 0 ? (float)totalDmg / totalBossDamage * 100f : 0f;
 
@@ -471,11 +531,16 @@ namespace BornAgainM
                         var detailText = uiElement.transform.Find("DetailText")?.GetComponent<Text>();
                         if (detailText != null)
                         {
-                            detailText.text = $"True: {trueDmg} | Hits: {hits} | Avg: {avg}";
+                            detailText.text = $"Direct: {directDmg} | DoT: {dotDmg} | Avg: {avg}";
+                        }
+
+                        var critText = uiElement.transform.Find("CritText")?.GetComponent<Text>();
+                        if (critText != null)
+                        {
+                            critText.text = $"Crit: {critDmg} ({critPercent:F1}%) | True: {trueDmg} ({truePercent:F1}%)";
                         }
                     }
 
-                    // Nettoyer les joueurs qui ne sont plus dans le top pour ce boss
                     var playersToRemove = bossUIElements[bossName].Keys.Except(currentPlayers).ToList();
                     foreach (var player in playersToRemove)
                     {
@@ -538,7 +603,7 @@ namespace BornAgainM
             containerRect.anchorMin = new Vector2(0.5f, 1f);
             containerRect.anchorMax = new Vector2(0.5f, 1f);
             containerRect.pivot = new Vector2(0.5f, 1f);
-            containerRect.sizeDelta = new Vector2(180f, 30f); // Réduit en hauteur
+            containerRect.sizeDelta = new Vector2(180f, 35f); // Augmenté pour la ligne de crit
 
             var bgObj = new GameObject("Background");
             bgObj.transform.SetParent(container.transform, false);
@@ -548,26 +613,28 @@ namespace BornAgainM
             bgRect.sizeDelta = Vector2.zero;
 
             var bgImg = bgObj.AddComponent<Image>();
-            bgImg.color = new Color(0.15f, 0.15f, 0.2f, 0.8f);
+            bgImg.color = new Color(0.25f, 0.25f, 0.3f, 0.4f);
             bgImg.raycastTarget = false;
 
+            // Nom du joueur
             var nameObj = new GameObject("NameText");
             nameObj.transform.SetParent(container.transform, false);
             var nameRect = nameObj.AddComponent<RectTransform>();
             nameRect.anchorMin = new Vector2(0f, 1f);
             nameRect.anchorMax = new Vector2(0f, 1f);
             nameRect.pivot = new Vector2(0f, 1f);
-            nameRect.anchoredPosition = new Vector2(5f, -3f);
+            nameRect.anchoredPosition = new Vector2(5f, -2f);
             nameRect.sizeDelta = new Vector2(90f, 12f);
 
             var nameText = nameObj.AddComponent<Text>();
             if (cachedFont != null) nameText.font = cachedFont;
-            nameText.fontSize = 10;
+            nameText.fontSize = 10;  // Augmenté de 10 à 12
             nameText.color = Color.white;
-            nameText.alignment = TextAnchor.UpperLeft;
+            nameText.alignment = TextAnchor.LowerLeft;
             nameText.fontStyle = FontStyle.Bold;
             nameText.raycastTarget = false;
 
+            // Dégâts totaux
             var dmgObj = new GameObject("DamageText");
             dmgObj.transform.SetParent(container.transform, false);
             var dmgRect = dmgObj.AddComponent<RectTransform>();
@@ -575,11 +642,11 @@ namespace BornAgainM
             dmgRect.anchorMax = new Vector2(1f, 1f);
             dmgRect.pivot = new Vector2(1f, 1f);
             dmgRect.anchoredPosition = new Vector2(-5f, -2f);
-            dmgRect.sizeDelta = new Vector2(80f, 14f);
+            dmgRect.sizeDelta = new Vector2(80f, 12f);
 
             var dmgText = dmgObj.AddComponent<Text>();
             if (cachedFont != null) dmgText.font = cachedFont;
-            dmgText.fontSize = 10;
+            dmgText.fontSize = 12;  // Augmenté de 10 à 12
             dmgText.color = new Color(1f, 0.4f, 0.3f, 1f);
             dmgText.alignment = TextAnchor.UpperRight;
             dmgText.fontStyle = FontStyle.Bold;
@@ -589,21 +656,43 @@ namespace BornAgainM
             dmgOutline.effectColor = Color.black;
             dmgOutline.effectDistance = new Vector2(1f, -1f);
 
+            // Détails (True damage, Avg)
             var detailObj = new GameObject("DetailText");
             detailObj.transform.SetParent(container.transform, false);
             var detailRect = detailObj.AddComponent<RectTransform>();
-            detailRect.anchorMin = new Vector2(0f, 0f);
-            detailRect.anchorMax = new Vector2(1f, 0f);
-            detailRect.pivot = new Vector2(0.5f, 0f);
-            detailRect.anchoredPosition = new Vector2(0f, 2f);
+            detailRect.anchorMin = new Vector2(0f, 0.5f);
+            detailRect.anchorMax = new Vector2(1f, 0.5f);
+            detailRect.pivot = new Vector2(0.5f, 0.5f);
+            detailRect.anchoredPosition = new Vector2(0f, 0f);
             detailRect.sizeDelta = new Vector2(-10f, 10f);
 
             var detailText = detailObj.AddComponent<Text>();
             if (cachedFont != null) detailText.font = cachedFont;
-            detailText.fontSize = 8;
+            detailText.fontSize = 9;  // Augmenté de 8 à 9
             detailText.color = new Color(0.7f, 0.7f, 0.7f, 1f);
-            detailText.alignment = TextAnchor.LowerCenter;
+            detailText.alignment = TextAnchor.MiddleCenter;
             detailText.raycastTarget = false;
+
+            // Ligne de statistiques de crit
+            var critObj = new GameObject("CritText");
+            critObj.transform.SetParent(container.transform, false);
+            var critRect = critObj.AddComponent<RectTransform>();
+            critRect.anchorMin = new Vector2(0f, 0f);
+            critRect.anchorMax = new Vector2(1f, 0f);
+            critRect.pivot = new Vector2(0.5f, 0f);
+            critRect.anchoredPosition = new Vector2(0f, 2f);
+            critRect.sizeDelta = new Vector2(-10f, 10f);
+
+            var critText = critObj.AddComponent<Text>();
+            if (cachedFont != null) critText.font = cachedFont;
+            critText.fontSize = 9;  // Augmenté de 7 à 9
+            critText.color = new Color(1f, 0.8f, 0.2f, 1f); // Couleur dorée pour les crits
+            critText.alignment = TextAnchor.LowerCenter;
+            critText.raycastTarget = false;
+
+            var critOutline = critObj.AddComponent<Outline>();
+            critOutline.effectColor = Color.black;
+            critOutline.effectDistance = new Vector2(1f, -1f);
 
             return container;
         }

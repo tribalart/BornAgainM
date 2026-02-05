@@ -415,6 +415,7 @@
 
 	<ItemGroup>
 		<Compile Include="BankManager.cs" />
+		<Compile Include="Class1.cs" />
 		<Compile Include="LiveAttackDamage.cs" />
 		<Compile Include="PlayersStats.cs" />
 		<Compile Include="PlayersList.cs" />
