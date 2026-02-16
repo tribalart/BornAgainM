@@ -118,7 +118,7 @@ namespace BornAgainM
             MelonLogger.Msg("Live Player UI (toggle with NumKeyDivide)");
             damageMeterUI = new DamageMeterUI();
             damageMeterUI.CreateUI();
-            MultiClient.Initialize();
+           // MultiClient.Initialize();
 
             sortBank = new SortBank();
             playersListUI = new PlayersListUI();
