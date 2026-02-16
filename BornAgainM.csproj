@@ -84,9 +84,6 @@
 		<Reference Include="Il2CppSystem.Web">
 			<HintPath>C:\Program Files (x86)\Steam\steamapps\common\Born Again\MelonLoader\Il2CppAssemblies\Il2CppSystem.Web.dll</HintPath>
 		</Reference>
-		<Reference Include="Il2CppSystem.Windows.Forms">
-			<HintPath>C:\Program Files (x86)\Steam\steamapps\common\Born Again\MelonLoader\Il2CppAssemblies\Il2CppSystem.Windows.Forms.dll</HintPath>
-		</Reference>
 		<Reference Include="Il2CppSystem.Xml">
 			<HintPath>C:\Program Files (x86)\Steam\steamapps\common\Born Again\MelonLoader\Il2CppAssemblies\Il2CppSystem.Xml.dll</HintPath>
 		</Reference>
@@ -406,6 +403,7 @@
 			<HintPath>C:\Program Files (x86)\Steam\steamapps\common\Born Again\MelonLoader\net6\Il2CppInterop.Common.dll</HintPath>
 		</Reference>
 
+
 	</ItemGroup>
 
 	<PropertyGroup>
@@ -415,11 +413,13 @@
 
 	<ItemGroup>
 		<Compile Include="BankManager.cs" />
-		<Compile Include="Class1.cs" />
-		<Compile Include="LiveAttackDamage.cs" />
+		<Compile Include="canequip.cs" />
+		<Compile Include="MultiClient.cs" />
+		<Compile Include="DamageM.cs" />
+		<Compile Include="PlayersListUi.cs" />
 		<Compile Include="PlayersStats.cs" />
-		<Compile Include="PlayersList.cs" />
 		<Compile Include="Core1.cs" />
+		<Compile Include="ressurect.cs" />
 	</ItemGroup>
 	
 	<Target Name="PostBuild" AfterTargets="PostBuildEvent">

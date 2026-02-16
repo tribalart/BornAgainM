@@ -118,7 +118,7 @@ namespace BornAgainM
             MelonLogger.Msg("Live Player UI (toggle with NumKeyDivide)");
             damageMeterUI = new DamageMeterUI();
             damageMeterUI.CreateUI();
-
+            MultiClient.Initialize();
 
             sortBank = new SortBank();
             playersListUI = new PlayersListUI();
@@ -126,11 +126,29 @@ namespace BornAgainM
             // Appliquer les patches Harmony
             var harmony = new HarmonyLib.Harmony("com.bornagainm.mod");
             harmony.PatchAll();
-            MelonLogger.Msg("Harmony patches applied");
+            try
+            {
+
+                BlessingsPatchRegistrar.Register(harmony);
+
+                MelonLogger.Msg("Harmony patches applied");
+                
+            }
+            catch (Exception) {
+
+                MelonLogger.Msg(" LiveAttackDamage.RegisterBlessingsPatch(harmony) is null");
+            }
+            
         }
 
         public override void OnUpdate()
         {
+
+          //  MultiClient.OnUpdate();
+
+
+
+
 
             if (initdamaMeterUI == 0)
                 damageMeterUI.Toggle();
@@ -165,6 +183,8 @@ namespace BornAgainM
                 return;
             }
             CaptureAttacks();
+        //    MultiClient.Initialize();
+           
         }
 
         public override void OnLateUpdate()
