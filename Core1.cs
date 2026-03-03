@@ -1,31 +1,25 @@
 ﻿using System;
 using System.Linq;
 using System.Collections.Generic;
-using System.Collections;
 using System.Threading.Tasks;
 using MelonLoader;
 using UnityEngine;
-using UnityEngine.UI;
 using Il2Cpp;
 using Il2CppZero.Game.Shared;
 using HarmonyLib;
-using Il2CppInterop.Runtime;
 using Il2CppRonin.Model.Simulation;
-using Il2CppRonin.Model.Data;
 using Il2CppRonin.Model.Simulation.Components;
-using Il2CppRonin.Model.Structs;
 using Il2CppRonin.Model.Enums;
-using System.Runtime.InteropServices;
-using System.Reflection;
+using Il2CppInterop.Runtime;
+using Il2CppRonin.Model.Data;
 
-[assembly: MelonInfo(typeof(BornAgainM.Core), "BornAgainM", "2.0.8", "Toi")]
+[assembly: MelonInfo(typeof(BornAgainM.Core), "BornAgainM", "2.0.9", "Toi")]
 [assembly: MelonGame("Unnamed Studios", "Born Again")]
 
 namespace BornAgainM
 {
     public class Core : MelonMod
     {
-
         private SortBank sortBank;
 
         private bool isRecording = false;
@@ -34,50 +28,7 @@ namespace BornAgainM
         private readonly HashSet<uint> processedAttacks = new();
         private readonly Dictionary<uint, PlayerDPS> players = new();
         private DamageMeterUI damageMeterUI;
-        private static PlayersListUI playersListUI;
-        private int initdamaMeterUI = 0;
-        public static Dictionary<uint, int> playerDamage = new Dictionary<uint, int>();
-
-        // MODIFICATION ICI POUR ACCÈS GLOBAL
-        public static void ToggleLivePlayerUI()
-        {
-            playersListUI?.ToggleLivePlayerUI();
-        }
-
-
-        // Patch pour tracker les dégâts
-        [HarmonyPatch(typeof(WorldObject))]
-        [HarmonyPatch(nameof(WorldObject.WorldMessageDamage))]
-        public class WorldMessageDamagePatch
-        {
-            static void Postfix(
-                WorldObject __instance,
-                int damage,
-                bool fromPlayer,
-                bool isPlayer,
-                bool trueDamage,
-                bool criticalStrike
-            )
-            {
-                if (__instance == null || __instance.Pointer == IntPtr.Zero)
-                    return;
-
-                if (damage <= 0)
-                    return;
-
-                Character character = __instance.TryCast<Character>();
-                if (character == null)
-                    return;
-
-                uint entityId = character.EntityId;
-
-                if (!playerDamage.ContainsKey(entityId))
-                    playerDamage[entityId] = 0;
-
-                playerDamage[entityId] += damage;
-
-            }
-        }
+        private int initDamageMeterUI = 0;
 
         private class AttackInfo
         {
@@ -108,71 +59,51 @@ namespace BornAgainM
             public double AvgHit => Attacks.Count > 0 ? Attacks.Average(a => a.Damage) : 0;
             public int TrueDamageCount => Attacks.Count(a => a.IsTrueDamage);
             public int TrueDamageTotal => Attacks.Where(a => a.IsTrueDamage).Sum(a => a.Damage);
-
         }
 
         public override void OnInitializeMelon()
         {
+            MelonLogger.Msg("BornAgainM Mod Loaded");
+            MelonLogger.Msg("DPS Meter (toggle with NumKey+)");
+            MelonLogger.Msg("Damage Meter UI auto-enabled");
 
-            MelonLogger.Msg("DPS Meter Loaded (toggle with NumKey+)");
-            MelonLogger.Msg("Live Player UI (toggle with NumKeyDivide)");
             damageMeterUI = new DamageMeterUI();
             damageMeterUI.CreateUI();
-           // MultiClient.Initialize();
 
             sortBank = new SortBank();
-            playersListUI = new PlayersListUI();
 
             // Appliquer les patches Harmony
             var harmony = new HarmonyLib.Harmony("com.bornagainm.mod");
             harmony.PatchAll();
+
             try
             {
-
                 BlessingsPatchRegistrar.Register(harmony);
-
-                MelonLogger.Msg("Harmony patches applied");
-                
+                MelonLogger.Msg("Harmony patches applied successfully");
             }
-            catch (Exception) {
-
-                MelonLogger.Msg(" LiveAttackDamage.RegisterBlessingsPatch(harmony) is null");
+            catch (Exception ex)
+            {
+                MelonLogger.Error($"Error applying Harmony patches: {ex.Message}");
             }
-            
         }
 
         public override void OnUpdate()
         {
-
-          //  MultiClient.OnUpdate();
-
-
-
-
-
-            if (initdamaMeterUI == 0)
+            // Initialiser l'UI au premier update
+            if (initDamageMeterUI == 0)
                 damageMeterUI.Toggle();
-            initdamaMeterUI = 1;
+            initDamageMeterUI = 1;
 
+            // Mettre à jour l'UI du Damage Meter
             damageMeterUI.UpdateUI();
 
+            // Gestion du DPS Meter (NumPad+)
             if (Input.GetKeyDown(KeyCode.KeypadPlus))
             {
                 if (!isRecording)
                     StartDPS();
                 else
                     StopDPS();
-            }
-
-            if (Input.GetKeyDown(KeyCode.KeypadDivide))
-            {
-                playersListUI.ToggleLivePlayerUI();
-            }
-           
-
-            if (PlayersListUIState.liveCanvas != null && PlayersListUIState.liveCanvas.activeSelf)
-            {
-                playersListUI.UpdateLivePlayerUI();
             }
 
             if (!isRecording) return;
@@ -183,8 +114,6 @@ namespace BornAgainM
                 return;
             }
             CaptureAttacks();
-        //    MultiClient.Initialize();
-           
         }
 
         public override void OnLateUpdate()
@@ -338,58 +267,6 @@ namespace BornAgainM
             {
                 MelonLogger.Error($"Error in PostChat: {ex.Message}");
             }
-        }
-
-        private async void OnPlayerNameClicked(Character character)
-        {
-            if (character == null) return;
-
-            try
-            {
-                MelonLogger.Msg($"=== STATS [{character.EntityName}] ===");
-
-                var entityState = character.GetComponent<EntityState>();
-
-                Stats stats = entityState.StatIncreases;
-                int tries = 0;
-                while (stats.Strength == 0 && stats.MaxHealth == 0 && tries < 10)
-                {
-                    await Task.Delay(200);
-                    stats = entityState.StatIncreases;
-                    tries++;
-                }
-
-                if (stats.Strength == 0 && stats.MaxHealth == 0)
-                {
-                    MelonLogger.Msg("Stats still zero after waiting.");
-                }
-                else
-                {
-                    LogStats(stats);
-                }
-
-                MelonLogger.Msg("=== COMPONENTS ===");
-                var components = character.gameObject.GetComponents<Component>();
-                foreach (var comp in components)
-                {
-                    if (comp != null)
-                        MelonLogger.Msg($"  - {comp.GetIl2CppType().FullName}");
-                }
-            }
-            catch (Exception ex)
-            {
-                MelonLogger.Error($"OnPlayerNameClicked error: {ex}");
-            }
-        }
-
-        private void LogStats(Stats stats)
-        {
-            MelonLogger.Msg($"Strength : {stats.Strength}");
-            MelonLogger.Msg($"Dexterity: {stats.Dexterity}");
-            MelonLogger.Msg($"Defense  : {stats.Defense}");
-            MelonLogger.Msg($"Vigor    : {stats.Vigor}");
-            MelonLogger.Msg($"Speed    : {stats.Speed}");
-            MelonLogger.Msg($"MaxHP    : {stats.MaxHealth}");
         }
     }
 

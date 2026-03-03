@@ -414,14 +414,10 @@
 	<ItemGroup>
 		<Compile Include="BankManager.cs" />
 		<Compile Include="DamageM.cs" />
-		<Compile Include="PlayersListUi.cs" />
-		<Compile Include="PlayersStats.cs" />
 		<Compile Include="Core1.cs" />
-		
 	</ItemGroup>
 	
 	<Target Name="PostBuild" AfterTargets="PostBuildEvent">
 	<Exec Command="COPY &quot;$(TargetPath)&quot; &quot;C:\Program Files (x86)\Steam\steamapps\common\Born Again\Mods&quot;" />
 	</Target>
-
 </Project>

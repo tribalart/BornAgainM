@@ -1,4 +1,5 @@
 ﻿using Il2CppRonin.Model.Simulation.Components;
+using Il2CppRonin.Model.Definitions;
 using MelonLoader;
 using UnityEngine;
 using UnityEngine.UI;
@@ -19,56 +20,137 @@ using Il2CppRonin.Model.Data;
 namespace BornAgainM
 {
     // ═══════════════════════════════════════════════════════════════════
-    // DATA LAYER
+    // PLAYER STATS TRACKING
     // ═══════════════════════════════════════════════════════════════════
-    [HarmonyPatch(typeof(LiveAttack))]
-    [HarmonyPatch(nameof(LiveAttack.Dispose))]
+    public class PlayerStatsTracker
+    {
+        private static readonly Dictionary<uint, PlayerStats> loggedCharacters = new Dictionary<uint, PlayerStats>();
+
+        public class PlayerStats
+        {
+            public string Name;
+            public uint EntityId;
+            public int PlayerDamageTotal;
+            public Dictionary<StatType, (int Base, int Functional)> Stats = new Dictionary<StatType, (int Base, int Functional)>();
+        }
+
+        public static void UpdateStats(Character character)
+        {
+            if (character == null || character.Pointer == IntPtr.Zero) return;
+            if (character.GetStatBase(StatType.MaxHealth) <= 0) return;
+
+            uint entityId = character.EntityId;
+
+            if (!loggedCharacters.TryGetValue(entityId, out var stats))
+            {
+                stats = new PlayerStats
+                {
+                    Name = character.EntityName,
+                    EntityId = entityId,
+                    PlayerDamageTotal = GetPlayerDamageTotal(character)
+                };
+
+                foreach (StatType stat in Enum.GetValues(typeof(StatType)))
+                {
+                    int baseValue = character.GetStatBase(stat);
+                    int functionalValue = character.GetStatFunctional(stat);
+                    stats.Stats[stat] = (baseValue, functionalValue);
+                }
+
+                loggedCharacters[entityId] = stats;
+            }
+            else
+            {
+                // Mise à jour des stats
+                foreach (StatType stat in Enum.GetValues(typeof(StatType)))
+                {
+                    int baseValue = character.GetStatBase(stat);
+                    int functionalValue = character.GetStatFunctional(stat);
+                    stats.Stats[stat] = (baseValue, functionalValue);
+                }
+
+                // Mise à jour du player damage total
+                int currentDamage = GetPlayerDamageTotal(character);
+                stats.PlayerDamageTotal = currentDamage;
+            }
+        }
+
+        private static int GetPlayerDamageTotal(Character character)
+        {
+            var worldObj = character.TryCast<WorldObject>();
+            return worldObj?._playerDamageTotal ?? 0;
+        }
+
+        public static PlayerStats GetLoggedStats(uint entityId)
+        {
+            loggedCharacters.TryGetValue(entityId, out var stats);
+            return stats;
+        }
+
+        public static void Clear()
+        {
+            loggedCharacters.Clear();
+        }
+    }
+
+    [HarmonyPatch(typeof(Il2Cpp.WorldObject))]
+    [HarmonyPatch(nameof(Il2Cpp.WorldObject.RemoveFromWorld))]
+    internal class WorldObjectRemovePatch
+    {
+        static void Prefix(Il2Cpp.WorldObject __instance)
+        {
+            try
+            {
+                var entity = __instance.TryCast<Il2Cpp.Entity>();
+                if (entity == null) return;
+                if (!LiveAttackDamage.BossNames.Contains(entity.EntityName)) return;
+                MelonLogger.Msg($"[DamageMeter] {entity.EntityName} (id:{entity.EntityId}) removed from world");
+            }
+            catch (Exception ex) { MelonLogger.Error($"[RemoveFromWorld] {ex.Message}"); }
+        }
+    }
+
+    [HarmonyPatch(typeof(Il2Cpp.WorldObject))]
+    [HarmonyPatch(nameof(Il2Cpp.WorldObject.HitBy))]
     internal class LiveAttackDamage
     {
         public class AttackInfo
         {
-            public int Count = 0, TotalDamage = 0, MinDamage = int.MaxValue, MaxDamage = 0;
+            public int Count = 0, TotalDamage = 0, TotalArmorDamage = 0;
+            public int MinDamage = int.MaxValue, MaxDamage = 0;
             public int CritCount = 0, CritDamage = 0, TrueCount = 0, TrueDamage = 0, DoTCount = 0;
         }
 
         public class PlayerDamageStats
         {
-            public int TotalDamage = 0, DirectDamage = 0, DoTDamage = 0, CritDamage = 0, TrueDamage = 0;
+            public int TotalDamage = 0, TotalArmorDamage = 0;
+            public int DirectDamage = 0, DoTDamage = 0, CritDamage = 0, TrueDamage = 0;
             public int HitsCount = 0, DirectHits = 0, DoTHits = 0;
             public string ThreadName = "";
             public Dictionary<string, AttackInfo> AttacksByType = new Dictionary<string, AttackInfo>();
         }
 
-        // File d'attente pour les attaques dont l'owner n'est pas encore dans le cache
         public class PendingAttack
         {
             public uint OwnerId;
-            public ushort Damage;
-            public bool TrueDamage;
+            public int Damage;
+            public int ArmorDamage;
             public AttackFlags Flags;
-            public IntPtr AttackPointer;
-            public List<(uint targetId, string bossName)> ResolvedBossHits =
-                new List<(uint, string)>();
+            public bool TrueDamage;
+            public ulong DedupKey;
+            public uint TargetId;
+            public string BossName;
             public string AttackType = "Unknown";
             public bool IsDoT = false;
             public float QueuedAt;
             public const float MAX_AGE = 10f;
         }
 
-        // bossName → instanceId → playerName → stats
-        public static Dictionary<string, Dictionary<int, Dictionary<string, PlayerDamageStats>>> BossAttackInfoDict =
-            new Dictionary<string, Dictionary<int, Dictionary<string, PlayerDamageStats>>>();
+        public static Dictionary<string, Dictionary<uint, Dictionary<string, PlayerDamageStats>>> BossAttackInfoDict =
+            new Dictionary<string, Dictionary<uint, Dictionary<string, PlayerDamageStats>>>();
 
-        public static Dictionary<string, int> BossInstanceCounter = new Dictionary<string, int>();
-
-        // Dédup par IntPtr (une instance LiveAttack = un objet unique en mémoire)
-        public static HashSet<IntPtr> CountedAttacks = new HashSet<IntPtr>();
-
-        // File d'attente
+        public static HashSet<ulong> CountedAttacks = new HashSet<ulong>();
         public static List<PendingAttack> PendingQueue = new List<PendingAttack>();
-
-        internal static Dictionary<uint, (uint startTime, Vec2 coords)> lastAttackByOwner =
-            new Dictionary<uint, (uint, Vec2)>();
 
         public static Dictionary<uint, Character> characterCache = new Dictionary<uint, Character>();
         public static Dictionary<uint, string> playerThreadCache = new Dictionary<uint, string>();
@@ -87,18 +169,11 @@ namespace BornAgainM
             "Mounted Knight","Djinn","Bubra Elephant","Mannah the Malevolent"
         };
 
-        // EntityId → instanceId.
-        // Un nouveau run est créé UNIQUEMENT quand un EntityId inédit est rencontré pour un boss.
-        // Le pointeur Il2Cpp NE sert PAS à détecter un nouveau combat : il change librement en plein
-        // fight (pool d'objets Unity/Il2Cpp) et déclencherait de faux runs.
-        internal static Dictionary<uint, int> EntityToBossInstance = new Dictionary<uint, int>();
+        public static string LocalPlayerName = "";
 
         internal static string GetCharacterThread(Character character)
             => playerThreadCache.TryGetValue(character.EntityId, out var t) ? t : "";
 
-        // ───────────────────────────────────────────────────────────────
-        // Cache des personnages
-        // ───────────────────────────────────────────────────────────────
         public static void UpdateCharacterCache()
         {
             float now = Time.time;
@@ -110,6 +185,10 @@ namespace BornAgainM
             foreach (var k in dead) characterCache.Remove(k);
 
             var all = GameObject.FindObjectsOfType<Character>();
+            var localChar = GameObject.FindObjectOfType<Character>();
+            if (localChar != null && !string.IsNullOrEmpty(localChar.EntityName))
+                LocalPlayerName = localChar.EntityName;
+
             int newCount = 0;
             foreach (var ch in all)
             {
@@ -135,66 +214,47 @@ namespace BornAgainM
             }
         }
 
-        // ───────────────────────────────────────────────────────────────
-        // Replay de la file d'attente
-        // ───────────────────────────────────────────────────────────────
         private static void ProcessPendingQueue()
         {
             if (PendingQueue.Count == 0) return;
             float now = Time.time;
             var toRemove = new List<PendingAttack>();
-
             foreach (var pending in PendingQueue)
             {
                 if (now - pending.QueuedAt > PendingAttack.MAX_AGE)
                 {
-                    MelonLogger.Warning($"[DamageMeter] Pending attack owner={pending.OwnerId} expired, dropped.");
+                    MelonLogger.Warning($"[DamageMeter] Pending expired owner={pending.OwnerId}, dropped.");
                     toRemove.Add(pending); continue;
                 }
-
-                if (!characterCache.TryGetValue(pending.OwnerId, out var character) || character == null)
-                    continue;
-
+                if (!characterCache.TryGetValue(pending.OwnerId, out var character) || character == null) continue;
                 string attackerName = character.EntityName;
                 if (string.IsNullOrEmpty(attackerName)) { toRemove.Add(pending); continue; }
-
-                foreach (var (targetId, bossName) in pending.ResolvedBossHits)
-                    RecordDamage(pending.OwnerId, attackerName, targetId, bossName,
-                        pending.Damage, pending.TrueDamage, pending.Flags,
-                        pending.AttackType, pending.IsDoT);
-
-                MelonLogger.Msg($"[DamageMeter] Replayed pending for {attackerName} ({pending.ResolvedBossHits.Count} boss hit(s))");
+                RecordDamage(pending.OwnerId, attackerName, pending.TargetId, pending.BossName,
+                    pending.Damage, pending.ArmorDamage, pending.TrueDamage, pending.Flags,
+                    pending.AttackType, pending.IsDoT);
+                MelonLogger.Msg($"[DamageMeter] Replayed pending for {attackerName}");
                 toRemove.Add(pending);
             }
             foreach (var r in toRemove) PendingQueue.Remove(r);
         }
 
-        // ───────────────────────────────────────────────────────────────
-        // Méthode centrale d'enregistrement extraite pour réutilisation (Prefix + replay)
         private static void RecordDamage(
             uint ownerId, string attackerName,
             uint targetId, string bossName,
-            ushort damage, bool trueDamage, AttackFlags flags,
+            int damage, int armorDamage, bool trueDamage, AttackFlags flags,
             string attackType, bool isDoT)
         {
-            // Nouveau run uniquement si l'EntityId n'a jamais été vu.
-            // Le pointeur Il2Cpp varie librement en cours de combat (pool d'objets),
-            // il ne constitue pas un signal fiable de "nouveau boss".
-            if (!EntityToBossInstance.ContainsKey(targetId))
+            uint bossInstanceId = targetId;
+
+            if (!BossAttackInfoDict.ContainsKey(bossName))
+                BossAttackInfoDict[bossName] = new Dictionary<uint, Dictionary<string, PlayerDamageStats>>();
+
+            if (!BossAttackInfoDict[bossName].ContainsKey(bossInstanceId))
             {
-                if (!BossInstanceCounter.ContainsKey(bossName)) BossInstanceCounter[bossName] = 0;
-                BossInstanceCounter[bossName]++;
-                EntityToBossInstance[targetId] = BossInstanceCounter[bossName];
-                MelonLogger.Msg($"[DamageMeter] New run for '{bossName}': Run {BossInstanceCounter[bossName]} (EntityId={targetId})");
+                BossAttackInfoDict[bossName][bossInstanceId] = new Dictionary<string, PlayerDamageStats>();
+                MelonLogger.Msg($"[DamageMeter] New run '{bossName}' id:{bossInstanceId}");
             }
 
-            int bossInstanceId = EntityToBossInstance[targetId];
-
-            // ── Dictionnaires stats ──────────────────────────────────────
-            if (!BossAttackInfoDict.ContainsKey(bossName))
-                BossAttackInfoDict[bossName] = new Dictionary<int, Dictionary<string, PlayerDamageStats>>();
-            if (!BossAttackInfoDict[bossName].ContainsKey(bossInstanceId))
-                BossAttackInfoDict[bossName][bossInstanceId] = new Dictionary<string, PlayerDamageStats>();
             if (!BossAttackInfoDict[bossName][bossInstanceId].ContainsKey(attackerName))
             {
                 BossAttackInfoDict[bossName][bossInstanceId][attackerName] = new PlayerDamageStats();
@@ -216,43 +276,57 @@ namespace BornAgainM
             if (!stats.AttacksByType.ContainsKey(attackType))
                 stats.AttacksByType[attackType] = new AttackInfo();
             var ai = stats.AttacksByType[attackType];
-            ai.Count++; ai.TotalDamage += damage;
+            ai.Count++; ai.TotalDamage += damage; ai.TotalArmorDamage += armorDamage;
             if (damage < ai.MinDamage) ai.MinDamage = damage;
             if (damage > ai.MaxDamage) ai.MaxDamage = damage;
             if (isCrit) { ai.CritCount++; ai.CritDamage += damage; }
             if (isTrueDmg) { ai.TrueCount++; ai.TrueDamage += damage; }
             if (isDoT) ai.DoTCount++;
 
-            stats.TotalDamage += damage; stats.HitsCount++;
+            stats.TotalDamage += damage;
+            stats.TotalArmorDamage += armorDamage;
+            stats.HitsCount++;
             if (isDoT) { stats.DoTDamage += damage; stats.DoTHits++; }
             else { stats.DirectDamage += damage; stats.DirectHits++; }
             if (isCrit) stats.CritDamage += damage;
             if (isTrueDmg) stats.TrueDamage += damage;
         }
 
-        // ───────────────────────────────────────────────────────────────
-        // Prefix : patch Harmony appelé avant LiveAttack.Dispose()
-        // ───────────────────────────────────────────────────────────────
-        static void Prefix(LiveAttack __instance)
+        static void Postfix(Il2Cpp.WorldObject __instance, Il2Cpp.Attack attack, Vec2 attackCoordinates, bool fromPlayer, int __result)
         {
             try
             {
                 if (__instance == null || __instance.Pointer == IntPtr.Zero) return;
-                if (__instance.Hits == null || __instance.Hits.Count == 0) return;
+                if (__result <= 0) return;
+                if (attack == null || attack.Pointer == IntPtr.Zero) return;
 
-                IntPtr attackPtr = __instance.Pointer;
-                if (CountedAttacks.Contains(attackPtr)) return;
-                CountedAttacks.Add(attackPtr);
+                var entity = __instance.TryCast<Il2Cpp.Entity>();
+                if (entity == null) return;
+                if (!BossNames.Contains(entity.EntityName)) return;
 
-                uint ownerId = __instance.OwnerId;
-                ushort damage = __instance.Damage;
-                bool trueDamage = __instance.TrueDamage;
-                AttackFlags flags = __instance.Flags;
+                string bossName = entity.EntityName;
+                uint targetId = entity.EntityId;
+                int damage = __result;
+                int armorDamage = attack.ArmorDamage;
 
-                // Résolution du type d'attaque
+                var la = attack.LiveAttack;
+                if (la == null || la.Pointer == IntPtr.Zero) return;
+
+                uint ownerId = la.OwnerId;
+                bool trueDamage = la.TrueDamage;
+                AttackFlags flags = attack.Flags;
+
+                uint attackId = la.Id;
+                ulong dedupKey = attackId != 0
+                    ? attackId
+                    : ((ulong)ownerId << 32) | la.StartTime;
+
+                if (CountedAttacks.Contains(dedupKey)) return;
+                CountedAttacks.Add(dedupKey);
+
                 bool isDoT = false;
                 string attackType = "Unknown";
-                var desc = __instance.AttackDescriptor;
+                var desc = la.AttackDescriptor;
                 if (desc != null)
                 {
                     attackType = desc.Effect ?? "Basic";
@@ -262,20 +336,8 @@ namespace BornAgainM
                         isDoT = true;
                 }
 
-                // Résolution des cibles boss en amont (avant la mise en file éventuelle)
-                var entities = GameObject.FindObjectsOfType<Il2Cpp.Entity>();
-                var bossHits = new List<(uint targetId, string bossName)>();
-                foreach (uint targetId in __instance.Hits)
-                {
-                    var target = entities.FirstOrDefault(e => e.EntityId == targetId);
-                    if (target == null || !BossNames.Contains(target.EntityName)) continue;
-                    bossHits.Add((targetId, target.EntityName));
-                }
-                if (bossHits.Count == 0) return;
-
                 UpdateCharacterCache();
 
-                // Recherche du personnage attaquant
                 characterCache.TryGetValue(ownerId, out Character character);
                 if (character == null || character.Pointer == IntPtr.Zero)
                 {
@@ -289,7 +351,6 @@ namespace BornAgainM
                             string thr = GetCharacterThread(character);
                             if (!string.IsNullOrEmpty(thr)) playerThreadCache[ownerId] = thr;
                         }
-                        MelonLogger.Msg($"[DamageMeter] Player cached (fallback): {character.EntityName} ({ownerId})");
                     }
                 }
 
@@ -299,10 +360,12 @@ namespace BornAgainM
                     {
                         OwnerId = ownerId,
                         Damage = damage,
+                        ArmorDamage = armorDamage,
                         TrueDamage = trueDamage,
                         Flags = flags,
-                        AttackPointer = attackPtr,
-                        ResolvedBossHits = bossHits,
+                        DedupKey = dedupKey,
+                        TargetId = targetId,
+                        BossName = bossName,
                         AttackType = attackType,
                         IsDoT = isDoT,
                         QueuedAt = Time.time
@@ -312,19 +375,34 @@ namespace BornAgainM
                 }
 
                 string attackerName = character.EntityName;
-                lastAttackByOwner[ownerId] = (__instance.StartTime, __instance.TargetCoordinates);
+                if (string.IsNullOrEmpty(attackerName))
+                {
+                    PendingQueue.Add(new PendingAttack
+                    {
+                        OwnerId = ownerId,
+                        Damage = damage,
+                        ArmorDamage = armorDamage,
+                        TrueDamage = trueDamage,
+                        Flags = flags,
+                        DedupKey = dedupKey,
+                        TargetId = targetId,
+                        BossName = bossName,
+                        AttackType = attackType,
+                        IsDoT = isDoT,
+                        QueuedAt = Time.time
+                    });
+                    return;
+                }
 
-                foreach (var (targetId, bossName) in bossHits)
-                    RecordDamage(ownerId, attackerName, targetId, bossName,
-                        damage, trueDamage, flags, attackType, isDoT);
+                RecordDamage(ownerId, attackerName, targetId, bossName,
+                    damage, armorDamage, trueDamage, flags, attackType, isDoT);
             }
-            catch (Exception ex) { MelonLogger.Error($"[LiveAttackDispose] {ex.Message}"); }
+            catch (Exception ex) { MelonLogger.Error($"[HitBy] {ex.Message}"); }
         }
 
         public static void ResetStats()
         {
-            BossAttackInfoDict.Clear(); BossInstanceCounter.Clear(); EntityToBossInstance.Clear();
-            CountedAttacks.Clear(); lastAttackByOwner.Clear(); PendingQueue.Clear();
+            BossAttackInfoDict.Clear(); CountedAttacks.Clear(); PendingQueue.Clear();
             characterCache.Clear(); playerThreadCache.Clear(); lastCacheScan = 0f;
         }
     }
@@ -342,7 +420,6 @@ namespace BornAgainM
             {
                 if (__instance == null || __instance.Pointer == IntPtr.Zero) return;
                 if (data.SlotCount == 0) return;
-
                 uint entityId = __instance.EntityId;
                 for (int i = 0; i < data.SlotCount; i++)
                 {
@@ -350,10 +427,8 @@ namespace BornAgainM
                     if (defId == 0 || !KnownThreadIds.Contains(defId)) continue;
                     string threadName = ResolveThreadName(defId);
                     if (string.IsNullOrEmpty(threadName)) continue;
-
                     LiveAttackDamage.playerThreadCache[entityId] = threadName;
-                    MelonLogger.Msg($"[BlessingsPatch] {__instance.EntityName} slot={i} defId={defId} → {threadName}");
-
+                    MelonLogger.Msg($"[BlessingsPatch] {__instance.EntityName} slot={i} defId={defId} -> {threadName}");
                     foreach (var bossDict in LiveAttackDamage.BossAttackInfoDict.Values)
                         foreach (var instDict in bossDict.Values)
                             if (instDict.TryGetValue(__instance.EntityName, out var stats) && string.IsNullOrEmpty(stats.ThreadName))
@@ -379,24 +454,15 @@ namespace BornAgainM
         {
             try
             {
-                var target = typeof(Character).GetMethod(
-                    "HandleData",
+                var target = typeof(Character).GetMethod("HandleData",
                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
-                    null, new Type[] { typeof(BlessingsData).MakeByRefType() }, null);
-
-                if (target == null)
-                {
-                    MelonLogger.Warning("[DamageMeter] HandleData(ref BlessingsData) not found, trying without ref...");
-                    target = typeof(Character).GetMethod(
-                        "HandleData",
-                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
-                        null, new Type[] { typeof(BlessingsData) }, null);
-                }
+                    null, new Type[] { typeof(BlessingsData).MakeByRefType() }, null)
+                    ?? typeof(Character).GetMethod("HandleData",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance,
+                    null, new Type[] { typeof(BlessingsData) }, null);
                 if (target == null) { MelonLogger.Error("[DamageMeter] HandleData(BlessingsData) not found."); return; }
-
-                var postfix = typeof(CharacterBlessingsDataPatch).GetMethod(
-                    "Postfix", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
-
+                var postfix = typeof(CharacterBlessingsDataPatch).GetMethod("Postfix",
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
                 harmony.Patch(target, postfix: new HarmonyLib.HarmonyMethod(postfix));
                 MelonLogger.Msg("[DamageMeter] BlessingsData patch registered.");
             }
@@ -412,24 +478,23 @@ namespace BornAgainM
         public static bool isVisible = true;
         private static bool playersVisible = false;
 
-        private static GameObject canvas, bossListPanel, statsPanel, detailsPanel, playersPanel;
+        private static GameObject canvas, bossListPanel, statsPanel, detailsPanel, playersPanel, playerStatsPanel;
         private static GameObject buttonCanvas, toggleButton, playersButton;
 
-        // ── Boss list : deux niveaux ─────────────────────────────────
-        // Niveau 1 : un bouton-en-tête par nom de boss unique
         private Dictionary<string, GameObject> bossHeaderButtons = new Dictionary<string, GameObject>();
-        // Niveau 2 : un bouton par run (bossName → instanceId → GameObject)
-        private Dictionary<string, Dictionary<int, GameObject>> bossRunButtons = new Dictionary<string, Dictionary<int, GameObject>>();
-        private string expandedBossName = ""; // quel boss est déplié
+        private Dictionary<string, Dictionary<uint, GameObject>> bossRunButtons = new Dictionary<string, Dictionary<uint, GameObject>>();
+        private string openAccordionBoss = "";
 
         private Dictionary<string, GameObject> playerUIElements = new Dictionary<string, GameObject>();
         private Dictionary<string, GameObject> attackDetailsElements = new Dictionary<string, GameObject>();
         private Dictionary<uint, GameObject> playerListElements = new Dictionary<uint, GameObject>();
+        private Dictionary<string, GameObject> playerStatsElements = new Dictionary<string, GameObject>();
 
         private Font cachedFont;
         private string selectedBossName = "";
         private string selectedPlayerName = "";
-        private int selectedBossInstance = 0;
+        private uint selectedBossInstance = 0;
+        private uint selectedOnlinePlayerId = 0;
 
         private static void ClearFocus()
         { try { EventSystem.current?.SetSelectedGameObject(null); } catch { } }
@@ -444,7 +509,6 @@ namespace BornAgainM
             return Color.white;
         }
 
-        // ── Création UI ──────────────────────────────────────────────
         public void CreateUI()
         {
             if (canvas != null) return;
@@ -458,7 +522,7 @@ namespace BornAgainM
                 canvas.AddComponent<GraphicRaycaster>().blockingObjects = GraphicRaycaster.BlockingObjects.None;
                 cachedFont = Resources.GetBuiltinResource<Font>("Arial.ttf");
                 CreateBossListPanel(); CreateStatsPanel(); CreateDetailsPanel();
-                CreatePlayersPanel(); CreateButtonCanvas();
+                CreatePlayersPanel(); CreatePlayerStatsPanel(); CreateButtonCanvas();
                 canvas.SetActive(false);
                 MelonLogger.Msg("Damage Meter UI created");
             }
@@ -484,35 +548,61 @@ namespace BornAgainM
 
         private void CreateBossListPanel()
         {
-            // Hauteur augmentée à 420 pour accueillir les sous-boutons de run
-            bossListPanel = Make("BossListPanel", canvas, new Vector2(-20, 85), new Vector2(160, 420));
-            bossListPanel.AddComponent<Image>().color = new Color(.1f, .1f, .12f, .15f);
+            bossListPanel = Make("BossListPanel", canvas, new Vector2(-20, 85), new Vector2(143, 360));
+            bossListPanel.AddComponent<Image>().color = new Color(.05f, .08f, .15f, .85f);
             bossListPanel.GetComponent<Image>().raycastTarget = false;
-            AddHeader(bossListPanel, "BOSSES", new Color(.2f, .1f, .1f, 1f), 25);
+            AddHeader(bossListPanel, "BOSSES", new Color(.08f, .15f, .28f, .95f), 25, rich: true);
+
+            var resetBtn = new GameObject("ResetBtn"); resetBtn.transform.SetParent(bossListPanel.transform, false);
+            var rbr = resetBtn.AddComponent<RectTransform>();
+            rbr.anchorMin = new Vector2(1, 1); rbr.anchorMax = new Vector2(1, 1);
+            rbr.pivot = new Vector2(1, 1); rbr.anchoredPosition = new Vector2(-3, -2);
+            rbr.sizeDelta = new Vector2(40, 20);
+            resetBtn.AddComponent<Image>().color = new Color(.65f, .25f, .20f, .95f);
+            var btn = resetBtn.AddComponent<Button>();
+            var nav = btn.navigation; nav.mode = Navigation.Mode.None; btn.navigation = nav;
+            btn.onClick.AddListener((UnityAction)(() => { ClearFocus(); OnResetClick(); }));
+            var to = new GameObject("Text"); to.transform.SetParent(resetBtn.transform, false);
+            var tr = to.AddComponent<RectTransform>();
+            tr.anchorMin = Vector2.zero; tr.anchorMax = Vector2.one; tr.sizeDelta = Vector2.zero;
+            var t = to.AddComponent<Text>(); if (cachedFont != null) t.font = cachedFont;
+            t.text = "Reset"; t.fontSize = 9; t.color = Color.white;
+            t.alignment = TextAnchor.MiddleCenter; t.fontStyle = FontStyle.Bold; t.raycastTarget = false;
         }
+
         private void CreateStatsPanel()
         {
-            statsPanel = Make("StatsPanel", canvas, new Vector2(-185, 85), new Vector2(200, 300));
-            statsPanel.AddComponent<Image>().color = new Color(.08f, .08f, .1f, .3f);
+            statsPanel = Make("StatsPanel", canvas, new Vector2(-168, 85), new Vector2(340, 360));
+            statsPanel.AddComponent<Image>().color = new Color(.05f, .08f, .15f, .85f);
             statsPanel.GetComponent<Image>().raycastTarget = false;
             statsPanel.SetActive(false);
         }
+
         private void CreateDetailsPanel()
         {
-            detailsPanel = Make("DetailsPanel", canvas, new Vector2(-395, 85), new Vector2(400, 400));
-            detailsPanel.AddComponent<Image>().color = new Color(.06f, .06f, .08f, .35f);
+            detailsPanel = Make("DetailsPanel", canvas, new Vector2(-513, 85), new Vector2(340, 360));
+            detailsPanel.AddComponent<Image>().color = new Color(.05f, .08f, .15f, .85f);
             detailsPanel.GetComponent<Image>().raycastTarget = false;
-            AddHeader(detailsPanel, "ATTACK DETAILS", new Color(.12f, .06f, .06f, 1f), 30, true);
+            AddHeader(detailsPanel, "ATTACK DETAILS", new Color(.08f, .15f, .28f, .95f), 25, true);
             detailsPanel.SetActive(false);
         }
+
         private void CreatePlayersPanel()
         {
-            // 360px de hauteur : header 25px + 25 lignes × 13px = 350px → confortable à 25 joueurs
-            playersPanel = Make("PlayersPanel", canvas, new Vector2(-20, 85), new Vector2(215, 360));
-            playersPanel.AddComponent<Image>().color = new Color(.07f, .07f, .1f, .35f);
+            playersPanel = Make("PlayersPanel", canvas, new Vector2(-20, 85), new Vector2(143, 360));
+            playersPanel.AddComponent<Image>().color = new Color(.05f, .08f, .15f, .85f);
             playersPanel.GetComponent<Image>().raycastTarget = false;
-            AddHeader(playersPanel, "PLAYERS", new Color(.1f, .15f, .25f, 1f), 25, rich: true);
+            AddHeader(playersPanel, "PLAYERS", new Color(.08f, .15f, .28f, .95f), 25, rich: true);
             playersPanel.SetActive(false);
+        }
+
+        private void CreatePlayerStatsPanel()
+        {
+            playerStatsPanel = Make("PlayerStatsPanel", canvas, new Vector2(-168, 85), new Vector2(340, 360));
+            playerStatsPanel.AddComponent<Image>().color = new Color(.05f, .08f, .15f, .85f);
+            playerStatsPanel.GetComponent<Image>().raycastTarget = false;
+            AddHeader(playerStatsPanel, "PLAYER STATS", new Color(.08f, .15f, .28f, .95f), 25, true);
+            playerStatsPanel.SetActive(false);
         }
 
         private static GameObject Make(string name, GameObject parent, Vector2 pos, Vector2 size)
@@ -536,17 +626,12 @@ namespace BornAgainM
             var cont = new GameObject("BtnCont"); cont.transform.SetParent(buttonCanvas.transform, false);
             var cr = cont.AddComponent<RectTransform>();
             cr.anchorMin = cr.anchorMax = new Vector2(1, .5f); cr.pivot = new Vector2(1, .5f);
-            cr.anchoredPosition = new Vector2(-10, 310); cr.sizeDelta = new Vector2(250, 25);
+            cr.anchoredPosition = new Vector2(-10, 310); cr.sizeDelta = new Vector2(170, 25);
 
-            toggleButton = MakeBtn("ToggleBtn", "BossList", new Vector2(0, 0), new Color(.2f, .5f, .8f, 1f), cont);
+            toggleButton = MakeBtn("ToggleBtn", "BossList", new Vector2(0, 0), new Color(.25f, .45f, .25f, 1f), cont);
             toggleButton.GetComponent<Button>().onClick.AddListener((UnityAction)OnToggleClick);
-
-            MakeBtn("ResetBtn", "Reset Boss", new Vector2(-84, 0), new Color(.8f, .3f, .2f, 1f), cont)
-                .GetComponent<Button>().onClick.AddListener((UnityAction)OnResetClick);
-
-            playersButton = MakeBtn("PlayersBtn", "Online Players", new Vector2(-168, 0), new Color(.25f, .45f, .25f, 1f), cont);
+            playersButton = MakeBtn("PlayersBtn", "Online Players", new Vector2(-84, 0), new Color(.25f, .45f, .25f, 1f), cont);
             playersButton.GetComponent<Button>().onClick.AddListener((UnityAction)OnPlayersClick);
-
             buttonCanvas.SetActive(true);
         }
 
@@ -570,72 +655,109 @@ namespace BornAgainM
             return obj;
         }
 
-        // ── Callbacks boutons barre ───────────────────────────────────
-        private void OnToggleClick() { ClearFocus(); Toggle(); UpdateBtnColors(); }
+        private void OnToggleClick()
+        {
+            ClearFocus();
+            if (playersVisible)
+            {
+                playersVisible = false;
+                if (playersPanel) playersPanel.SetActive(false);
+                if (playerStatsPanel) playerStatsPanel.SetActive(false);
+                selectedOnlinePlayerId = 0;
+                isVisible = true;
+                if (bossListPanel) bossListPanel.SetActive(true);
+                canvas?.SetActive(true);
+            }
+            else
+            {
+                isVisible = !isVisible;
+                if (bossListPanel) bossListPanel.SetActive(isVisible);
+                if (!isVisible) { if (statsPanel) statsPanel.SetActive(false); if (detailsPanel) detailsPanel.SetActive(false); }
+                canvas?.SetActive(isVisible);
+            }
+            UpdateBtnColors();
+        }
+
         private void OnResetClick()
         {
             ClearFocus();
             LiveAttackDamage.ResetStats();
-
             foreach (var b in bossHeaderButtons.Values) if (b) UnityEngine.Object.Destroy(b);
             bossHeaderButtons.Clear();
             foreach (var d in bossRunButtons.Values)
                 foreach (var b in d.Values) if (b) UnityEngine.Object.Destroy(b);
             bossRunButtons.Clear();
-            expandedBossName = "";
-
+            openAccordionBoss = "";
             foreach (var e in playerUIElements.Values) if (e) UnityEngine.Object.Destroy(e); playerUIElements.Clear();
             foreach (var e in attackDetailsElements.Values) if (e) UnityEngine.Object.Destroy(e); attackDetailsElements.Clear();
-            selectedBossName = ""; selectedBossInstance = 0; selectedPlayerName = "";
+            selectedBossName = ""; selectedBossInstance = 0; selectedPlayerName = ""; selectedOnlinePlayerId = 0;
+            cachedBossKeys.Clear();
             if (statsPanel) statsPanel.SetActive(false);
             if (detailsPanel) detailsPanel.SetActive(false);
+            if (playerStatsPanel) playerStatsPanel.SetActive(false);
         }
+
         private void OnPlayersClick()
         {
             ClearFocus();
-            playersVisible = !playersVisible;
-            if (playersVisible)
+            if (isVisible)
             {
-                canvas?.SetActive(true);
+                isVisible = false;
                 if (bossListPanel) bossListPanel.SetActive(false);
                 if (statsPanel) statsPanel.SetActive(false);
                 if (detailsPanel) detailsPanel.SetActive(false);
+                playersVisible = true;
                 if (playersPanel) playersPanel.SetActive(true);
+                selectedOnlinePlayerId = 0;
+                if (playerStatsPanel) playerStatsPanel.SetActive(false);
+                canvas?.SetActive(true);
             }
             else
             {
-                if (playersPanel) playersPanel.SetActive(false);
-                if (bossListPanel) bossListPanel.SetActive(true);
-                if (!isVisible) canvas?.SetActive(false);
+                playersVisible = !playersVisible;
+                if (playersPanel) playersPanel.SetActive(playersVisible);
+                if (!playersVisible)
+                {
+                    if (playerStatsPanel) playerStatsPanel.SetActive(false);
+                    selectedOnlinePlayerId = 0;
+                }
+                canvas?.SetActive(playersVisible);
             }
             UpdateBtnColors();
         }
+
         private void UpdateBtnColors()
         {
             if (toggleButton) toggleButton.GetComponent<Image>().color = isVisible
-                ? new Color(.2f, .8f, .3f, 1f) : new Color(.2f, .5f, .8f, 1f);
+                ? new Color(.2f, .8f, .3f, 1f) : new Color(.25f, .45f, .25f, 1f);
             if (playersButton) playersButton.GetComponent<Image>().color = playersVisible
                 ? new Color(.2f, .8f, .3f, 1f) : new Color(.25f, .45f, .25f, 1f);
         }
 
-        // ── UpdateUI principal ────────────────────────────────────────
         public void UpdateUI()
         {
             if (canvas == null) return;
-            if (playersVisible) { UpdatePlayersPanel(); return; }
+            if (playersVisible)
+            {
+                UpdatePlayersPanel();
+                if (selectedOnlinePlayerId != 0 && playerStatsPanel && playerStatsPanel.activeSelf)
+                    UpdatePlayerStatsPanel();
+                return;
+            }
             if (!isVisible) return;
             try
             {
                 UpdateBossList();
-                if (!string.IsNullOrEmpty(selectedBossName) && selectedBossInstance > 0) UpdateStatsPanel();
+                if (!string.IsNullOrEmpty(selectedBossName) && selectedBossInstance != 0) UpdateStatsPanel();
                 if (!string.IsNullOrEmpty(selectedPlayerName)) UpdateDetailsPanel();
+                if (selectedOnlinePlayerId != 0 && playerStatsPanel && playerStatsPanel.activeSelf)
+                    UpdatePlayerStatsPanel();
             }
             catch (Exception ex) { MelonLogger.Error($"[DamageMeterUI.UpdateUI] {ex.Message}"); }
         }
 
-        // ── Boss list deux niveaux ────────────────────────────────────
         private HashSet<string> cachedBossKeys = new HashSet<string>();
-        private Dictionary<string, HashSet<int>> cachedBossInstances = new Dictionary<string, HashSet<int>>();
+        private Dictionary<string, HashSet<uint>> cachedBossInstances = new Dictionary<string, HashSet<uint>>();
 
         private void UpdateBossList()
         {
@@ -643,16 +765,15 @@ namespace BornAgainM
             bool changed = !cur.SetEquals(cachedBossKeys);
             if (!changed) foreach (var b in cur)
                 {
-                    var ci = new HashSet<int>(LiveAttackDamage.BossAttackInfoDict[b].Keys);
+                    var ci = new HashSet<uint>(LiveAttackDamage.BossAttackInfoDict[b].Keys);
                     if (!cachedBossInstances.ContainsKey(b) || !ci.SetEquals(cachedBossInstances[b])) { changed = true; break; }
                 }
             if (!changed) return;
 
             cachedBossKeys = cur;
             cachedBossInstances.Clear();
-            foreach (var b in cur) cachedBossInstances[b] = new HashSet<int>(LiveAttackDamage.BossAttackInfoDict[b].Keys);
+            foreach (var b in cur) cachedBossInstances[b] = new HashSet<uint>(LiveAttackDamage.BossAttackInfoDict[b].Keys);
 
-            // Supprime les boutons de boss disparus
             foreach (var bn in bossHeaderButtons.Keys.Except(LiveAttackDamage.BossAttackInfoDict.Keys).ToList())
             {
                 if (bossHeaderButtons[bn]) UnityEngine.Object.Destroy(bossHeaderButtons[bn]);
@@ -662,87 +783,56 @@ namespace BornAgainM
                     foreach (var b in bossRunButtons[bn].Values) if (b) UnityEngine.Object.Destroy(b);
                     bossRunButtons.Remove(bn);
                 }
+                if (openAccordionBoss == bn) openAccordionBoss = "";
             }
 
             float yOff = -30f;
             foreach (var bossName in LiveAttackDamage.BossAttackInfoDict.Keys)
             {
                 int runCount = LiveAttackDamage.BossAttackInfoDict[bossName].Count;
+                bool isOpen = bossName == openAccordionBoss;
 
-                // ── Niveau 1 : en-tête boss ──────────────────────────
                 if (!bossHeaderButtons.ContainsKey(bossName))
                     bossHeaderButtons[bossName] = CreateBossHeaderButton(bossName);
-
                 var hdr = bossHeaderButtons[bossName];
                 if (!hdr) continue;
-                hdr.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, yOff);
 
-                // Couleur : vert si c'est le boss sélectionné/déplié, sinon rouge sombre
-                bool isExpanded = bossName == expandedBossName;
-                bool isSelected = bossName == selectedBossName;
-                hdr.GetComponent<Image>().color = isExpanded
-                    ? new Color(.28f, .18f, .08f, 1f)   // déplié → orange sombre
-                    : new Color(.22f, .10f, .10f, .95f); // replié → rouge sombre
+                hdr.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, yOff);
+                hdr.GetComponent<Image>().color = bossName == selectedBossName
+                    ? new Color(.12f, .28f, .48f, .95f) : new Color(.08f, .12f, .20f, .90f);
 
                 string dn = bossName.Length > 14 ? bossName.Substring(0, 13) + "." : bossName;
                 var txt = hdr.transform.Find("Text")?.GetComponent<Text>();
                 if (txt)
                 {
-                    if (runCount == 1)
-                    {
-                        // Un seul run : pas de flèche, juste le nom + "(1)" discret
-                        // Le fond vert si ce run est sélectionné
-                        bool runSel = selectedBossName == bossName;
-                        hdr.GetComponent<Image>().color = runSel
-                            ? new Color(.18f, .35f, .18f, 1f)   // vert sombre = sélectionné
-                            : new Color(.22f, .10f, .10f, .95f);
-                        txt.text = $"  {dn}  <color=#666><size=8>(1)</size></color>";
-                    }
-                    else
-                    {
-                        // Multi-runs : flèche + compteur
-                        string arrow = isExpanded ? "▼ " : "▶ ";
-                        txt.text = $"{arrow}{dn} <color=#aaa><size=8>({runCount})</size></color>";
-                    }
+                    txt.supportRichText = true;
+                    string arrow = isOpen ? "▼ " : "▶ ";
+                    txt.text = runCount > 1
+                        ? $"{arrow}{dn} <color=#6090C0><size=8>({runCount})</size></color>"
+                        : $"{arrow}{dn}";
                 }
-                yOff -= 24f;
+                yOff -= 22f;
 
-                // ── Niveau 2 : sous-boutons de run ───────────────────
                 if (!bossRunButtons.ContainsKey(bossName))
-                    bossRunButtons[bossName] = new Dictionary<int, GameObject>();
-
-                // Les run buttons ne sont JAMAIS affichés pour un boss à 1 run.
-                // Pour les boss multi-runs, ils sont affichés uniquement si déplié.
-                bool showRuns = isExpanded && runCount > 1;
+                    bossRunButtons[bossName] = new Dictionary<uint, GameObject>();
 
                 foreach (var instId in LiveAttackDamage.BossAttackInfoDict[bossName].Keys.OrderBy(x => x))
                 {
                     if (!bossRunButtons[bossName].ContainsKey(instId))
                         bossRunButtons[bossName][instId] = CreateRunButton(bossName, instId);
-
                     var runBtn = bossRunButtons[bossName][instId];
                     if (!runBtn) continue;
-
-                    if (!showRuns)
-                    {
-                        runBtn.SetActive(false);
-                        continue;
-                    }
-
+                    if (!isOpen) { runBtn.SetActive(false); continue; }
                     runBtn.SetActive(true);
                     runBtn.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, yOff);
-
                     bool sel = selectedBossName == bossName && selectedBossInstance == instId;
                     runBtn.GetComponent<Image>().color = sel
-                        ? new Color(.3f, .5f, .7f, 1f)
-                        : new Color(.14f, .16f, .22f, .95f);
-
+                        ? new Color(.20f, .45f, .70f, .98f) : new Color(.10f, .20f, .36f, .95f);
                     var rtxt = runBtn.transform.Find("Text")?.GetComponent<Text>();
                     if (rtxt)
                     {
-                        int totalDmg = LiveAttackDamage.BossAttackInfoDict[bossName][instId]
-                            .Sum(x => x.Value.TotalDamage);
-                        rtxt.text = $"  Run {instId}   <color=#aaa>{Fmt(totalDmg)}</color>";
+                        int totalDmg = LiveAttackDamage.BossAttackInfoDict[bossName][instId].Sum(x => x.Value.TotalDamage);
+                        rtxt.text = $"  id:{instId} <color=#88AACC>{Fmt(totalDmg)}</color>";
                         rtxt.supportRichText = true;
                     }
                     yOff -= 20f;
@@ -750,7 +840,6 @@ namespace BornAgainM
             }
         }
 
-        // Bouton en-tête de boss (niveau 1)
         private GameObject CreateBossHeaderButton(string bossName)
         {
             var obj = new GameObject($"BossHdr_{bossName}");
@@ -758,7 +847,7 @@ namespace BornAgainM
             var r = obj.AddComponent<RectTransform>();
             r.anchorMin = new Vector2(0, 1); r.anchorMax = new Vector2(1, 1);
             r.pivot = new Vector2(.5f, 1); r.sizeDelta = new Vector2(-6, 22);
-            obj.AddComponent<Image>().color = new Color(.22f, .10f, .10f, .95f);
+            obj.AddComponent<Image>().color = new Color(.08f, .12f, .20f, .90f);
             var btn = obj.AddComponent<Button>();
             var nav = btn.navigation; nav.mode = Navigation.Mode.None; btn.navigation = nav;
             btn.onClick.AddListener((UnityAction)(() => { ClearFocus(); OnBossHeaderClick(bossName); }));
@@ -766,21 +855,20 @@ namespace BornAgainM
             var tr = to.AddComponent<RectTransform>();
             tr.anchorMin = Vector2.zero; tr.anchorMax = Vector2.one; tr.sizeDelta = new Vector2(-4, 0);
             var t = to.AddComponent<Text>(); if (cachedFont != null) t.font = cachedFont;
-            t.fontSize = 10; t.color = Color.white; t.alignment = TextAnchor.MiddleLeft;
-            t.fontStyle = FontStyle.Bold; t.supportRichText = true; t.raycastTarget = false;
-            to.AddComponent<Outline>().effectColor = Color.black;
+            t.fontSize = 10; t.color = new Color(.85f, .95f, 1f, 1f);
+            t.alignment = TextAnchor.MiddleLeft; t.fontStyle = FontStyle.Bold; t.supportRichText = true; t.raycastTarget = false;
+            to.AddComponent<Outline>().effectColor = new Color(0, 0, 0, .85f);
             return obj;
         }
 
-        // Bouton de run (niveau 2)
-        private GameObject CreateRunButton(string bossName, int instanceId)
+        private GameObject CreateRunButton(string bossName, uint instanceId)
         {
             var obj = new GameObject($"RunBtn_{bossName}_{instanceId}");
             obj.transform.SetParent(bossListPanel.transform, false);
             var r = obj.AddComponent<RectTransform>();
             r.anchorMin = new Vector2(0, 1); r.anchorMax = new Vector2(1, 1);
-            r.pivot = new Vector2(.5f, 1); r.sizeDelta = new Vector2(-14, 18); // indenté
-            obj.AddComponent<Image>().color = new Color(.14f, .16f, .22f, .95f);
+            r.pivot = new Vector2(.5f, 1); r.sizeDelta = new Vector2(-14, 19);
+            obj.AddComponent<Image>().color = new Color(.10f, .20f, .36f, .95f);
             var btn = obj.AddComponent<Button>();
             var nav = btn.navigation; nav.mode = Navigation.Mode.None; btn.navigation = nav;
             btn.onClick.AddListener((UnityAction)(() => { ClearFocus(); OnRunButtonClick(bossName, instanceId); }));
@@ -788,76 +876,47 @@ namespace BornAgainM
             var tr = to.AddComponent<RectTransform>();
             tr.anchorMin = Vector2.zero; tr.anchorMax = Vector2.one; tr.sizeDelta = new Vector2(-4, 0);
             var t = to.AddComponent<Text>(); if (cachedFont != null) t.font = cachedFont;
-            t.fontSize = 9; t.color = Color.white; t.alignment = TextAnchor.MiddleLeft;
-            t.fontStyle = FontStyle.Bold; t.supportRichText = true; t.raycastTarget = false;
-            to.AddComponent<Outline>().effectColor = Color.black;
+            t.fontSize = 10; t.color = Color.white;
+            t.alignment = TextAnchor.MiddleLeft; t.fontStyle = FontStyle.Bold; t.supportRichText = true; t.raycastTarget = false;
+            to.AddComponent<Outline>().effectColor = new Color(0, 0, 0, .9f);
             return obj;
         }
 
-        // Clic sur le nom d'un boss (niveau 1)
         private void OnBossHeaderClick(string bossName)
         {
-            var instances = LiveAttackDamage.BossAttackInfoDict.ContainsKey(bossName)
-                ? LiveAttackDamage.BossAttackInfoDict[bossName] : null;
-            if (instances == null) return;
-
-            if (instances.Count == 1)
-            {
-                // Un seul run → sélection directe, jamais de dépliage
-                // (expandedBossName n'est PAS mis à jour : les run buttons restent masqués)
-                int onlyId = instances.Keys.First();
-                OnRunButtonClick(bossName, onlyId);
-            }
-            else
-            {
-                // Plusieurs runs → toggle dépliage
-                if (expandedBossName == bossName)
-                {
-                    expandedBossName = "";
-                    // Désélectionner si on replie le boss en cours
-                    if (selectedBossName == bossName)
-                    {
-                        selectedBossName = ""; selectedBossInstance = 0; selectedPlayerName = "";
-                        if (statsPanel) statsPanel.SetActive(false);
-                        if (detailsPanel) detailsPanel.SetActive(false);
-                    }
-                }
-                else
-                {
-                    expandedBossName = bossName;
-                }
-            }
+            if (!LiveAttackDamage.BossAttackInfoDict.ContainsKey(bossName)) return;
+            openAccordionBoss = (openAccordionBoss == bossName) ? "" : bossName;
+            cachedBossKeys.Clear();
+            UpdateBossList();
         }
 
-        // Clic sur un bouton de run (niveau 2)
-        private void OnRunButtonClick(string bossName, int instanceId)
+        private void OnRunButtonClick(string bossName, uint instanceId)
         {
             if (selectedBossName == bossName && selectedBossInstance == instanceId)
             {
-                // Même run → toggle visibilité du panel stats
                 bool active = statsPanel && statsPanel.activeSelf;
                 if (statsPanel) statsPanel.SetActive(!active);
-                if (!active) { selectedPlayerName = ""; if (detailsPanel) detailsPanel.SetActive(false); }
+                if (!active)
+                {
+                    selectedPlayerName = "";
+                    selectedOnlinePlayerId = 0;
+                    if (detailsPanel) detailsPanel.SetActive(false);
+                    if (playerStatsPanel) playerStatsPanel.SetActive(false);
+                }
                 return;
             }
-
-            // Changement de run → flush complet des éléments joueurs pour éviter tout stale data
-            foreach (var e in playerUIElements.Values) if (e) UnityEngine.Object.Destroy(e);
-            playerUIElements.Clear();
-            foreach (var e in attackDetailsElements.Values) if (e) UnityEngine.Object.Destroy(e);
-            attackDetailsElements.Clear();
-
-            selectedBossName = bossName;
-            selectedBossInstance = instanceId;
-            selectedPlayerName = "";
+            foreach (var e in playerUIElements.Values) if (e) UnityEngine.Object.Destroy(e); playerUIElements.Clear();
+            foreach (var e in attackDetailsElements.Values) if (e) UnityEngine.Object.Destroy(e); attackDetailsElements.Clear();
+            selectedBossName = bossName; selectedBossInstance = instanceId; selectedPlayerName = "";
+            selectedOnlinePlayerId = 0;
             if (statsPanel) statsPanel.SetActive(true);
             if (detailsPanel) detailsPanel.SetActive(false);
+            if (playerStatsPanel) playerStatsPanel.SetActive(false);
             UpdateStatsPanel();
         }
 
-        // ── Players panel ────────────────────────────────────────────
         private float lastPlayersRefresh = 0f;
-        private const float PLAYERS_FLUSH_INTERVAL = 5f;
+        private const float PLAYERS_FLUSH_INTERVAL = 0.5f;
 
         private void UpdatePlayersPanel()
         {
@@ -865,50 +924,54 @@ namespace BornAgainM
             float now = Time.time;
             if (now - lastPlayersRefresh < PLAYERS_FLUSH_INTERVAL) return;
             lastPlayersRefresh = now;
-
             foreach (var el in playerListElements.Values) if (el) UnityEngine.Object.Destroy(el);
             playerListElements.Clear();
 
-            LiveAttackDamage.UpdateCharacterCache();
+            // Méthode directe et plus efficace pour lister les joueurs
+            var characters = GameObject.FindObjectsOfType<Character>();
+            if (characters == null || characters.Length == 0) return;
 
-            var sorted = LiveAttackDamage.characterCache
-                .Where(x => x.Value != null && x.Value.Pointer != IntPtr.Zero
-                         && !string.IsNullOrEmpty(x.Value.EntityName))
-                .GroupBy(x => x.Value.EntityName)
+            var validPlayers = new List<Character>();
+            foreach (var c in characters)
+            {
+                if (c == null || c.Pointer == IntPtr.Zero) continue;
+                if (string.IsNullOrEmpty(c.EntityName)) continue;
+                validPlayers.Add(c);
+
+                // Mettre à jour les stats du joueur
+                PlayerStatsTracker.UpdateStats(c);
+            }
+
+            // Trier par nom et éliminer les doublons
+            var sorted = validPlayers
+                .GroupBy(c => c.EntityName)
                 .Select(g => g.First())
-                .OrderBy(x => x.Value.EntityName)
+                .OrderBy(c => c.EntityName)
                 .ToList();
 
-            // Mise à jour du sous-titre avec le compte total
             var hdrTxt = playersPanel.transform.Find("Header/Text")?.GetComponent<Text>();
             if (hdrTxt) hdrTxt.text = $"PLAYERS  <color=#aaaaaa><size=9>({sorted.Count})</size></color>";
 
-            const float ROW_H = 13f;  // hauteur de ligne compacte
-            const float START_Y = -28f; // premier élément sous le header
-
             for (int i = 0; i < sorted.Count; i++)
             {
-                uint id = sorted[i].Key;
-                var ch = sorted[i].Value;
-
+                var ch = sorted[i];
+                uint id = ch.EntityId;
                 var el = CreatePlayerListElement(id);
                 playerListElements[id] = el;
-                el.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, START_Y - i * ROW_H);
+                el.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -28f - i * 13f);
+
+                // Highlight si sélectionné
+                var img = el.GetComponent<Image>();
+                if (img) img.color = id == selectedOnlinePlayerId
+                    ? new Color(.15f, .30f, .50f, .95f)
+                    : new Color(.08f, .12f, .20f, .88f);
 
                 var txt = el.transform.Find("Text")?.GetComponent<Text>();
                 if (txt == null) continue;
-
-                // Nom tronqué à 23 chars
-                string n = ch.EntityName;
-                if (n.Length > 23) n = n.Substring(0, 22) + ".";
-
-                // ■ coloré selon le thread, à gauche du nom en blanc
-                // Pas de thread connu → carré gris discret
+                string n = ch.EntityName; if (n.Length > 15) n = n.Substring(0, 14) + ".";
                 string thr = LiveAttackDamage.playerThreadCache.TryGetValue(id, out var tt) ? tt : "";
                 Color col = string.IsNullOrEmpty(thr) ? new Color(.3f, .3f, .3f, 1f) : GetThreadColor(thr);
-                string hex = ColorUtility.ToHtmlStringRGB(col);
-
-                txt.text = $"<color=#{hex}>■</color> <color=white>{n}</color>";
+                txt.text = $"<color=#{ColorUtility.ToHtmlStringRGB(col)}>■</color> <color=white>{n}</color>";
             }
         }
 
@@ -917,24 +980,181 @@ namespace BornAgainM
             var obj = new GameObject($"PL_{id}"); obj.transform.SetParent(playersPanel.transform, false);
             var r = obj.AddComponent<RectTransform>();
             r.anchorMin = new Vector2(0, 1); r.anchorMax = new Vector2(1, 1);
-            r.pivot = new Vector2(.5f, 1);
-            // Hauteur 12px → 25 lignes tiennent dans 335px disponibles
-            r.sizeDelta = new Vector2(-8, 12);
-            var img = obj.AddComponent<Image>();
-            img.color = new Color(.12f, .12f, .16f, .85f);
-            img.raycastTarget = false;
+            r.pivot = new Vector2(.5f, 1); r.sizeDelta = new Vector2(-8, 12);
+            obj.AddComponent<Image>().color = new Color(.08f, .12f, .20f, .88f);
+
+            // Ajouter le bouton pour rendre l'élément cliquable
+            var btn = obj.AddComponent<Button>();
+            var nav = btn.navigation; nav.mode = Navigation.Mode.None; btn.navigation = nav;
+            btn.onClick.AddListener((UnityAction)(() => { ClearFocus(); OnPlayerListClick(id); }));
+
             var to = new GameObject("Text"); to.transform.SetParent(obj.transform, false);
             var tr = to.AddComponent<RectTransform>();
-            tr.anchorMin = Vector2.zero; tr.anchorMax = Vector2.one;
-            tr.sizeDelta = new Vector2(-5, 0);
+            tr.anchorMin = Vector2.zero; tr.anchorMax = Vector2.one; tr.sizeDelta = new Vector2(-5, 0);
             var t = to.AddComponent<Text>(); if (cachedFont != null) t.font = cachedFont;
-            t.fontSize = 10; t.color = Color.white; t.alignment = TextAnchor.MiddleLeft;
-            t.supportRichText = true; t.raycastTarget = false;
+            t.fontSize = 11; t.color = new Color(.85f, .95f, 1f, 1f);
+            t.alignment = TextAnchor.MiddleLeft; t.supportRichText = true; t.raycastTarget = false;
             to.AddComponent<Outline>().effectColor = new Color(0, 0, 0, .8f);
             return obj;
         }
 
-        // ── Stats panel ──────────────────────────────────────────────
+        private void OnPlayerListClick(uint playerId)
+        {
+            if (selectedOnlinePlayerId == playerId)
+            {
+                // Toggle le panneau de stats
+                bool active = playerStatsPanel && playerStatsPanel.activeSelf;
+                if (playerStatsPanel) playerStatsPanel.SetActive(!active);
+                return;
+            }
+
+            selectedOnlinePlayerId = playerId;
+            if (playerStatsPanel)
+            {
+                // Position pour le mode Players (-168 pour être à côté du panneau Players)
+                playerStatsPanel.GetComponent<RectTransform>().anchoredPosition = new Vector2(-168, 85);
+                playerStatsPanel.SetActive(true);
+            }
+            UpdatePlayerStatsPanel();
+        }
+
+        private void UpdatePlayerStatsPanel()
+        {
+            if (!playerStatsPanel || selectedOnlinePlayerId == 0) return;
+
+            // Nettoyer les anciens éléments
+            foreach (var e in playerStatsElements.Values) if (e) UnityEngine.Object.Destroy(e);
+            playerStatsElements.Clear();
+
+            // Récupérer les stats du joueur via PlayerStatsTracker
+            var stats = PlayerStatsTracker.GetLoggedStats(selectedOnlinePlayerId);
+            if (stats == null)
+            {
+                playerStatsPanel.SetActive(false);
+                return;
+            }
+
+            // Mettre à jour le header
+            var hdrObj = playerStatsPanel.transform.Find("Header");
+            if (hdrObj != null)
+            {
+                var hdrTxt = hdrObj.Find("Text")?.GetComponent<Text>();
+                if (hdrTxt != null)
+                {
+                    string name = stats.Name.Length > 18 ? stats.Name.Substring(0, 17) + "." : stats.Name;
+                    string thr = LiveAttackDamage.playerThreadCache.TryGetValue(selectedOnlinePlayerId, out var t) ? t : "";
+                    if (!string.IsNullOrEmpty(thr))
+                    {
+                        string hex = ColorUtility.ToHtmlStringRGB(GetThreadColor(thr));
+                        hdrTxt.text = $"<color=#{hex}>{name}</color> STATS";
+                    }
+                    else
+                    {
+                        hdrTxt.text = $"{name}";
+                    }
+                }
+            }
+
+            // Ordre spécifique des stats : MaxHealth, Strength, Defense, Dexterity, Speed, Vigor
+            var statOrder = new List<StatType>
+            {
+                StatType.MaxHealth,
+                StatType.Strength,
+                StatType.Defense,
+                StatType.Dexterity,
+                StatType.Speed,
+                StatType.Vigor
+            };
+
+            // Afficher les stats dans l'ordre demandé
+            float yOffset = -30f;
+            int index = 0;
+
+            foreach (var statType in statOrder)
+            {
+                if (!stats.Stats.TryGetValue(statType, out var values)) continue;
+                if (values.Base == 0 && values.Functional == 0) continue;
+
+                var statObj = CreateStatElement(statType.ToString(), values.Base, values.Functional, index);
+                statObj.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, yOffset);
+                playerStatsElements[$"Stat_{statType}"] = statObj;
+                yOffset -= 18f;
+                index++;
+            }
+
+            // Afficher les autres stats qui ne sont pas dans l'ordre principal
+            var remainingStats = stats.Stats
+                .Where(kvp => !statOrder.Contains(kvp.Key))
+                .OrderBy(kvp => kvp.Key.ToString())
+                .ToList();
+
+            foreach (var kvp in remainingStats)
+            {
+                if (kvp.Value.Base == 0 && kvp.Value.Functional == 0) continue;
+
+                var statObj = CreateStatElement(kvp.Key.ToString(), kvp.Value.Base, kvp.Value.Functional, index);
+                statObj.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, yOffset);
+                playerStatsElements[$"Stat_{kvp.Key}"] = statObj;
+                yOffset -= 18f;
+                index++;
+            }
+        }
+
+        private GameObject CreateStatElement(string statName, int baseValue, int functionalValue, int index)
+        {
+            var obj = new GameObject($"Stat_{statName}");
+            obj.transform.SetParent(playerStatsPanel.transform, false);
+            var r = obj.AddComponent<RectTransform>();
+            r.anchorMin = new Vector2(0, 1); r.anchorMax = new Vector2(1, 1);
+            r.pivot = new Vector2(.5f, 1); r.sizeDelta = new Vector2(-10, 18);
+
+            var bg = new GameObject("Background"); bg.transform.SetParent(obj.transform, false);
+            var br = bg.AddComponent<RectTransform>();
+            br.anchorMin = Vector2.zero; br.anchorMax = Vector2.one; br.sizeDelta = Vector2.zero;
+            bg.AddComponent<Image>().color = index % 2 == 0
+                ? new Color(.08f, .12f, .20f, .90f)
+                : new Color(.06f, .09f, .16f, .90f);
+            bg.GetComponent<Image>().raycastTarget = false;
+
+            // Nom de la stat (à gauche) - 40% de largeur
+            var nameObj = new GameObject("Name"); nameObj.transform.SetParent(obj.transform, false);
+            var nameRect = nameObj.AddComponent<RectTransform>();
+            nameRect.anchorMin = new Vector2(0f, 0f); nameRect.anchorMax = new Vector2(0.40f, 1f);
+            nameRect.offsetMin = new Vector2(5, 0); nameRect.offsetMax = new Vector2(-2, 0);
+            var nameText = nameObj.AddComponent<Text>();
+            if (cachedFont != null) nameText.font = cachedFont;
+            nameText.fontSize = 10; nameText.color = new Color(.70f, .85f, 1f, 1f);
+            nameText.alignment = TextAnchor.MiddleLeft; nameText.fontStyle = FontStyle.Bold;
+            nameText.text = statName; nameText.raycastTarget = false;
+
+            // Base value (centre) - 30% de largeur
+            var baseObj = new GameObject("Base"); baseObj.transform.SetParent(obj.transform, false);
+            var baseRect = baseObj.AddComponent<RectTransform>();
+            baseRect.anchorMin = new Vector2(0.40f, 0f); baseRect.anchorMax = new Vector2(0.70f, 1f);
+            baseRect.offsetMin = new Vector2(2, 0); baseRect.offsetMax = new Vector2(-2, 0);
+            var baseText = baseObj.AddComponent<Text>();
+            if (cachedFont != null) baseText.font = cachedFont;
+            baseText.fontSize = 10; baseText.color = new Color(.85f, .95f, 1f, 1f);
+            baseText.alignment = TextAnchor.MiddleCenter; baseText.text = baseValue.ToString();
+            baseText.raycastTarget = false;
+
+            // Functional value (droite) - 30% de largeur
+            var funcObj = new GameObject("Functional"); funcObj.transform.SetParent(obj.transform, false);
+            var funcRect = funcObj.AddComponent<RectTransform>();
+            funcRect.anchorMin = new Vector2(0.70f, 0f); funcRect.anchorMax = new Vector2(1f, 1f);
+            funcRect.offsetMin = new Vector2(2, 0); funcRect.offsetMax = new Vector2(-5, 0);
+            var funcText = funcObj.AddComponent<Text>();
+            if (cachedFont != null) funcText.font = cachedFont;
+            funcText.fontSize = 10;
+            funcText.color = functionalValue != baseValue
+                ? new Color(.3f, 1f, .4f, 1f)
+                : new Color(.85f, .95f, 1f, 1f);
+            funcText.alignment = TextAnchor.MiddleCenter; funcText.text = functionalValue.ToString();
+            funcText.raycastTarget = false;
+
+            return obj;
+        }
+
         private void UpdateStatsPanel()
         {
             if (!statsPanel) return;
@@ -942,7 +1162,6 @@ namespace BornAgainM
                 !bi.TryGetValue(selectedBossInstance, out var ps))
             { statsPanel.SetActive(false); return; }
 
-            // En-tête dynamique avec nom du boss + numéro de run
             var hdrObj = statsPanel.transform.Find("RunHeader");
             if (hdrObj == null)
             {
@@ -950,12 +1169,12 @@ namespace BornAgainM
                 var hr = hdr.AddComponent<RectTransform>();
                 hr.anchorMin = new Vector2(0, 1); hr.anchorMax = new Vector2(1, 1);
                 hr.pivot = new Vector2(.5f, 1); hr.anchoredPosition = Vector2.zero; hr.sizeDelta = new Vector2(0, 22);
-                hdr.AddComponent<Image>().color = new Color(.15f, .12f, .06f, 1f);
+                hdr.AddComponent<Image>().color = new Color(.08f, .15f, .28f, .95f);
                 var to = new GameObject("Text"); to.transform.SetParent(hdr.transform, false);
                 var tr = to.AddComponent<RectTransform>();
                 tr.anchorMin = Vector2.zero; tr.anchorMax = Vector2.one; tr.sizeDelta = Vector2.zero;
                 var t = to.AddComponent<Text>(); if (cachedFont != null) t.font = cachedFont;
-                t.fontSize = 10; t.color = new Color(1f, .85f, .3f, 1f);
+                t.fontSize = 11; t.color = new Color(.85f, .95f, 1f, 1f);
                 t.alignment = TextAnchor.MiddleCenter; t.fontStyle = FontStyle.Bold; t.supportRichText = true;
                 to.AddComponent<Outline>().effectColor = Color.black;
                 hdrObj = hdr.transform;
@@ -963,8 +1182,25 @@ namespace BornAgainM
             var hdrTxt = hdrObj.Find("Text")?.GetComponent<Text>();
             if (hdrTxt)
             {
-                string dn = selectedBossName.Length > 18 ? selectedBossName.Substring(0, 17) + "." : selectedBossName;
-                hdrTxt.text = $"{dn} — Run {selectedBossInstance}";
+                string dn = selectedBossName.Length > 22 ? selectedBossName.Substring(0, 21) + "." : selectedBossName;
+                hdrTxt.text = $"{dn} <color=#6090C0><size=9>id:{selectedBossInstance}</size></color>";
+            }
+
+            var colHdrObj = statsPanel.transform.Find("ColHeader");
+            if (colHdrObj == null)
+            {
+                var ch = new GameObject("ColHeader"); ch.transform.SetParent(statsPanel.transform, false);
+                var cr = ch.AddComponent<RectTransform>();
+                cr.anchorMin = new Vector2(0, 1); cr.anchorMax = new Vector2(1, 1);
+                cr.pivot = new Vector2(.5f, 1); cr.anchoredPosition = new Vector2(0, -22); cr.sizeDelta = new Vector2(-8, 14);
+                ch.AddComponent<Image>().color = new Color(.06f, .10f, .18f, .95f);
+                ch.GetComponent<Image>().raycastTarget = false;
+                MakeColLabel(ch, "NAME", 0f, 0.28f, TextAnchor.MiddleLeft, 4, 0);
+                MakeColLabel(ch, "DAMAGE", 0.28f, 0.48f, TextAnchor.MiddleRight, 0, -2);
+                MakeColLabel(ch, "%", 0.48f, 0.59f, TextAnchor.MiddleRight, 0, -2);
+                MakeColLabel(ch, "ARMOR", 0.59f, 0.79f, TextAnchor.MiddleRight, 0, -2);
+                MakeColLabel(ch, "MAX", 0.79f, 1.00f, TextAnchor.MiddleRight, 0, -4);
+                colHdrObj = ch.transform;
             }
 
             var sorted = ps.OrderByDescending(x => x.Value.TotalDamage).ToList();
@@ -979,23 +1215,53 @@ namespace BornAgainM
                 var el = playerUIElements[pname];
                 if (!el) { playerUIElements.Remove(pname); continue; }
                 el.SetActive(true);
-                el.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -26f - i * 18f);
+                el.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -36f - i * 17f);
+
+                var stats = sorted[i].Value;
+                int dmg = stats.TotalDamage;
+                int armorDmg = stats.TotalArmorDamage;
+                float pct = total > 0 ? (float)dmg / total * 100f : 0f;
+                int maxHit = stats.AttacksByType.Count > 0 ? stats.AttacksByType.Values.Max(a => a.MaxDamage) : 0;
+
+                el.transform.Find("LocalBorder")?.gameObject.SetActive(
+                    !string.IsNullOrEmpty(LiveAttackDamage.LocalPlayerName) && pname == LiveAttackDamage.LocalPlayerName);
+
                 var bg = el.transform.Find("Background")?.GetComponent<Image>();
                 if (bg) bg.color = pname == selectedPlayerName
-                    ? new Color(.25f, .35f, .45f, .95f) : new Color(.15f, .15f, .18f, .92f);
-                var mt = el.transform.Find("MainText")?.GetComponent<Text>();
-                if (mt != null)
+                    ? new Color(.15f, .30f, .50f, .95f)
+                    : (i % 2 == 0 ? new Color(.08f, .12f, .20f, .90f) : new Color(.06f, .09f, .16f, .90f));
+
+                var barT = el.transform.Find("DmgBar")?.GetComponent<RectTransform>();
+                if (barT != null)
                 {
-                    string dn = pname.Length > 20 ? pname.Substring(0, 19) + "." : pname;
-                    int dmg = sorted[i].Value.TotalDamage;
-                    float pct = total > 0 ? (float)dmg / total * 100f : 0f;
-                    string hex = ColorUtility.ToHtmlStringRGB(GetThreadColor(sorted[i].Value.ThreadName));
-                    mt.supportRichText = true;
-                    mt.text = $"<size={mt.fontSize + 2}><b><color=#{hex}>{i + 1}. {dn}</color></b> <color=white>{dmg} ({pct:F1}%)</color></size>";
+                    var a = barT.anchorMax; a.x = total > 0 ? (float)dmg / total : 0f; barT.anchorMax = a;
                 }
+
+                string shortName = pname.Length > 12 ? pname.Substring(0, 11) + "." : pname;
+                var tName = el.transform.Find("ColName")?.GetComponent<Text>();
+                if (tName) { tName.supportRichText = true; tName.text = $"<b>{i + 1}. {shortName}</b>"; }
+                var tDmg = el.transform.Find("ColDmg")?.GetComponent<Text>();
+                if (tDmg) { tDmg.text = Fmt(dmg); tDmg.color = new Color(.85f, .95f, 1f, 1f); }
+                var tPct = el.transform.Find("ColPct")?.GetComponent<Text>();
+                if (tPct) { tPct.text = $"{pct:F1}%"; tPct.color = new Color(.60f, .75f, .95f, 1f); }
+                var tArmor = el.transform.Find("ColArmor")?.GetComponent<Text>();
+                if (tArmor) { tArmor.text = armorDmg > 0 ? Fmt(armorDmg) : "-"; tArmor.color = new Color(.4f, .75f, 1f, 1f); }
+                var tMax = el.transform.Find("ColMax")?.GetComponent<Text>();
+                if (tMax) { tMax.text = maxHit > 0 ? Fmt(maxHit) : "-"; tMax.color = new Color(.75f, .90f, 1f, 1f); }
             }
             foreach (var p in playerUIElements.Keys.Except(current).ToList())
                 if (playerUIElements[p]) playerUIElements[p].SetActive(false);
+        }
+
+        private void MakeColLabel(GameObject parent, string text, float x0, float x1, TextAnchor align, float lpad, float rpad)
+        {
+            var go = new GameObject($"Lbl_{text}"); go.transform.SetParent(parent.transform, false);
+            var rt = go.AddComponent<RectTransform>();
+            rt.anchorMin = new Vector2(x0, 0f); rt.anchorMax = new Vector2(x1, 1f);
+            rt.offsetMin = new Vector2(lpad, 0); rt.offsetMax = new Vector2(rpad, 0);
+            var t = go.AddComponent<Text>(); if (cachedFont != null) t.font = cachedFont;
+            t.text = text; t.fontSize = 8; t.color = new Color(.60f, .75f, .95f, 1f);
+            t.alignment = align; t.fontStyle = FontStyle.Bold; t.raycastTarget = false;
         }
 
         private GameObject CreatePlayerElement(string playerName)
@@ -1004,34 +1270,97 @@ namespace BornAgainM
             obj.transform.SetParent(statsPanel.transform, false);
             var r = obj.AddComponent<RectTransform>();
             r.anchorMin = new Vector2(0, 1); r.anchorMax = new Vector2(1, 1);
-            r.pivot = new Vector2(.5f, 1); r.sizeDelta = new Vector2(-10, 16);
+            r.pivot = new Vector2(.5f, 1); r.sizeDelta = new Vector2(-8, 16);
+
+            var border = new GameObject("LocalBorder"); border.transform.SetParent(obj.transform, false);
+            var borderR = border.AddComponent<RectTransform>();
+            borderR.anchorMin = Vector2.zero; borderR.anchorMax = Vector2.one; borderR.sizeDelta = Vector2.zero;
+            border.AddComponent<Image>().color = new Color(1f, .85f, .1f, .5f);
+            border.GetComponent<Image>().raycastTarget = false; border.SetActive(false);
+
             var bg = new GameObject("Background"); bg.transform.SetParent(obj.transform, false);
             var br = bg.AddComponent<RectTransform>();
-            br.anchorMin = Vector2.zero; br.anchorMax = Vector2.one; br.sizeDelta = Vector2.zero;
-            bg.AddComponent<Image>().color = new Color(.15f, .15f, .18f, .92f);
+            br.anchorMin = Vector2.zero; br.anchorMax = Vector2.one; br.sizeDelta = new Vector2(-2, -2);
+            bg.AddComponent<Image>().color = new Color(.08f, .12f, .20f, .90f);
+            bg.GetComponent<Image>().raycastTarget = false;
+
+            var bar = new GameObject("DmgBar"); bar.transform.SetParent(obj.transform, false);
+            var barR = bar.AddComponent<RectTransform>();
+            barR.anchorMin = Vector2.zero; barR.anchorMax = new Vector2(0f, 1f);
+            barR.offsetMin = new Vector2(1, 1); barR.offsetMax = new Vector2(0, -1);
+            bar.AddComponent<Image>().color = new Color(.15f, .35f, .65f, .45f);
+            bar.GetComponent<Image>().raycastTarget = false;
+
             var btn = obj.AddComponent<Button>();
             var nav = btn.navigation; nav.mode = Navigation.Mode.None; btn.navigation = nav;
             btn.onClick.AddListener((UnityAction)(() => { ClearFocus(); OnPlayerButtonClick(playerName); }));
-            var to = new GameObject("MainText"); to.transform.SetParent(obj.transform, false);
-            var tr = to.AddComponent<RectTransform>();
-            tr.anchorMin = Vector2.zero; tr.anchorMax = Vector2.one; tr.sizeDelta = new Vector2(-4, 0);
-            var t = to.AddComponent<Text>(); if (cachedFont != null) t.font = cachedFont;
-            t.fontSize = 9; t.color = Color.white; t.alignment = TextAnchor.MiddleLeft;
-            t.supportRichText = true; t.raycastTarget = false;
-            to.AddComponent<Outline>().effectColor = Color.black;
+
+            MakeColText(obj, "ColName", 0f, 0.28f, TextAnchor.MiddleLeft, 4, 0);
+            MakeColText(obj, "ColDmg", 0.28f, 0.48f, TextAnchor.MiddleRight, 0, -2);
+            MakeColText(obj, "ColPct", 0.48f, 0.59f, TextAnchor.MiddleRight, 0, -2);
+            MakeColText(obj, "ColArmor", 0.59f, 0.79f, TextAnchor.MiddleRight, 0, -2);
+            MakeColText(obj, "ColMax", 0.79f, 1.00f, TextAnchor.MiddleRight, 0, -4);
+
             return obj;
+        }
+
+        private Text MakeColText(GameObject parent, string name, float x0, float x1, TextAnchor align, float lpad, float rpad)
+        {
+            var go = new GameObject(name); go.transform.SetParent(parent.transform, false);
+            var rt = go.AddComponent<RectTransform>();
+            rt.anchorMin = new Vector2(x0, 0f); rt.anchorMax = new Vector2(x1, 1f);
+            rt.offsetMin = new Vector2(lpad, 0); rt.offsetMax = new Vector2(rpad, 0);
+            var t = go.AddComponent<Text>(); if (cachedFont != null) t.font = cachedFont;
+            t.fontSize = 10; t.color = Color.white; t.alignment = align;
+            t.supportRichText = true; t.raycastTarget = false;
+            go.AddComponent<Outline>().effectColor = new Color(0, 0, 0, .85f);
+            return t;
         }
 
         private void OnPlayerButtonClick(string playerName)
         {
             if (selectedPlayerName == playerName)
-            { bool a = detailsPanel && detailsPanel.activeSelf; if (detailsPanel) detailsPanel.SetActive(!a); return; }
+            {
+                bool a = detailsPanel && detailsPanel.activeSelf;
+                if (detailsPanel) detailsPanel.SetActive(!a);
+
+                // Toggle aussi le panneau de stats
+                bool statsActive = playerStatsPanel && playerStatsPanel.activeSelf;
+                if (playerStatsPanel) playerStatsPanel.SetActive(!statsActive);
+                return;
+            }
+
             selectedPlayerName = playerName;
             if (detailsPanel) detailsPanel.SetActive(true);
-            UpdateStatsPanel(); UpdateDetailsPanel();
+
+            // Trouver l'EntityId du joueur par son nom
+            uint foundId = 0;
+            foreach (var kvp in LiveAttackDamage.characterCache)
+            {
+                if (kvp.Value != null && kvp.Value.EntityName == playerName)
+                {
+                    foundId = kvp.Key;
+                    break;
+                }
+            }
+
+            // Afficher les stats si le joueur est trouvé
+            if (foundId != 0)
+            {
+                selectedOnlinePlayerId = foundId;
+                if (playerStatsPanel)
+                {
+                    // Position pour le mode BossList (-858 pour être à gauche du panneau Details)
+                    playerStatsPanel.GetComponent<RectTransform>().anchoredPosition = new Vector2(-858, 85);
+                    playerStatsPanel.SetActive(true);
+                }
+                UpdatePlayerStatsPanel();
+            }
+
+            UpdateStatsPanel();
+            UpdateDetailsPanel();
         }
 
-        // ── Details panel ────────────────────────────────────────────
         private void UpdateDetailsPanel()
         {
             if (!detailsPanel || string.IsNullOrEmpty(selectedPlayerName)) return;
@@ -1058,7 +1387,7 @@ namespace BornAgainM
             for (int i = 0; i < sorted.Count; i++)
             {
                 var el = CreateAttackDetailElement(sorted[i].Key, sorted[i].Value, stats.TotalDamage);
-                el.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -35f - i * 105f);
+                el.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -35f - i * 110f);
                 attackDetailsElements[sorted[i].Key + i] = el;
             }
         }
@@ -1069,17 +1398,17 @@ namespace BornAgainM
             obj.transform.SetParent(detailsPanel.transform, false);
             var r = obj.AddComponent<RectTransform>();
             r.anchorMin = new Vector2(0, 1); r.anchorMax = new Vector2(1, 1);
-            r.pivot = new Vector2(.5f, 1); r.sizeDelta = new Vector2(-10, 100);
+            r.pivot = new Vector2(.5f, 1); r.sizeDelta = new Vector2(-10, 105);
             var bg = new GameObject("Background"); bg.transform.SetParent(obj.transform, false);
             var br = bg.AddComponent<RectTransform>();
             br.anchorMin = Vector2.zero; br.anchorMax = Vector2.one; br.sizeDelta = Vector2.zero;
-            bg.AddComponent<Image>().color = new Color(.12f, .12f, .15f, .95f);
+            bg.AddComponent<Image>().color = new Color(.08f, .12f, .20f, .92f);
             var to = new GameObject("Title"); to.transform.SetParent(obj.transform, false);
             var tr = to.AddComponent<RectTransform>();
             tr.anchorMin = new Vector2(0, 1); tr.anchorMax = new Vector2(1, 1);
             tr.pivot = new Vector2(.5f, 1); tr.anchoredPosition = new Vector2(0, -3); tr.sizeDelta = new Vector2(-8, 18);
             var tt = to.AddComponent<Text>(); if (cachedFont != null) tt.font = cachedFont;
-            tt.fontSize = 12; tt.color = new Color(1f, .85f, .3f, 1f);
+            tt.fontSize = 12; tt.color = new Color(.85f, .95f, 1f, 1f);
             tt.alignment = TextAnchor.UpperLeft; tt.fontStyle = FontStyle.Bold;
             tt.text = attackType.Length > 30 ? attackType.Substring(0, 29) + "." : attackType;
             to.AddComponent<Outline>().effectColor = Color.black;
@@ -1096,9 +1425,10 @@ namespace BornAgainM
             dr.anchorMin = Vector2.zero; dr.anchorMax = Vector2.one;
             dr.pivot = new Vector2(.5f, .5f); dr.anchoredPosition = new Vector2(0, -12); dr.sizeDelta = new Vector2(-8, -22);
             var dt = dObj.AddComponent<Text>(); if (cachedFont != null) dt.font = cachedFont;
-            dt.fontSize = 10; dt.color = new Color(.9f, .9f, .9f, 1f); dt.alignment = TextAnchor.UpperLeft;
+            dt.fontSize = 10; dt.color = new Color(.70f, .85f, 1f, 1f); dt.alignment = TextAnchor.UpperLeft;
             dt.text = $"Hits:{info.Count}  |  Total:{Fmt(info.TotalDamage)} ({pct:F1}%)\n" +
                       $"Min:{info.MinDamage}  |  Max:{info.MaxDamage}  |  Avg:{(info.Count > 0 ? info.TotalDamage / info.Count : 0)}\n" +
+                      $"ArmorDmg:{Fmt(info.TotalArmorDamage)}\n" +
                       $"Crit:{info.CritCount} hits ({cP:F0}%)  -  {Fmt(info.CritDamage)} dmg ({cDP:F1}%)\n" +
                       $"True:{info.TrueCount} hits ({tP:F0}%)  -  {Fmt(info.TrueDamage)} dmg ({tDP:F1}%)\n" +
                       $"DoT:{info.DoTCount} hits ({dP:F0}%)";
@@ -1106,15 +1436,24 @@ namespace BornAgainM
         }
 
         private static string Fmt(int n)
-        { if (n >= 1_000_000) return $"{n / 1_000_000f:F1}M"; if (n >= 1_000) return $"{n / 1000f:F0}k"; return n.ToString(); }
+            => n.ToString("N0", System.Globalization.CultureInfo.GetCultureInfo("fr-FR")).Replace("\u00a0", " ");
 
         public void Toggle()
         {
             if (canvas == null) CreateUI();
+            if (playersVisible)
+            {
+                playersVisible = false;
+                if (playersPanel) playersPanel.SetActive(false);
+                if (playerStatsPanel) playerStatsPanel.SetActive(false);
+                selectedOnlinePlayerId = 0;
+            }
             isVisible = !isVisible;
-            if (isVisible && playersVisible) { playersVisible = false; UpdateBtnColors(); }
-            canvas?.SetActive(isVisible || playersVisible);
+            if (bossListPanel) bossListPanel.SetActive(isVisible);
+            if (!isVisible) { if (statsPanel) statsPanel.SetActive(false); if (detailsPanel) detailsPanel.SetActive(false); }
+            canvas?.SetActive(isVisible);
             buttonCanvas?.SetActive(true);
+            UpdateBtnColors();
             MelonLogger.Msg(isVisible ? "Damage Meter ON" : "Damage Meter OFF");
         }
     }
