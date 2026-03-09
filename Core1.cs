@@ -18,6 +18,7 @@ using Il2CppRonin.Model.Data;
 
 namespace BornAgainM
 {
+
     public class Core : MelonMod
     {
         private SortBank sortBank;
@@ -274,4 +275,6 @@ namespace BornAgainM
     {
         public static void Forget(this Task t) { }
     }
+
+
 }
