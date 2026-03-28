@@ -61,7 +61,6 @@ namespace BornAgainM
             }
             else
             {
-                // Mise à jour des stats
                 foreach (StatType stat in Enum.GetValues(typeof(StatType)))
                 {
                     int baseValue = character.GetStatBase(stat);
@@ -69,7 +68,6 @@ namespace BornAgainM
                     stats.Stats[stat] = (baseValue, functionalValue);
                 }
 
-                // Mise à jour du player damage total
                 int currentDamage = GetPlayerDamageTotal(character);
                 stats.PlayerDamageTotal = currentDamage;
             }
@@ -104,7 +102,6 @@ namespace BornAgainM
                 var entity = __instance.TryCast<Il2Cpp.Entity>();
                 if (entity == null) return;
                 if (!LiveAttackDamage.BossNames.Contains(entity.EntityName)) return;
-                MelonLogger.Msg($"[DamageMeter] {entity.EntityName} (id:{entity.EntityId}) removed from world");
             }
             catch (Exception ex) { MelonLogger.Error($"[RemoveFromWorld] {ex.Message}"); }
         }
@@ -118,14 +115,14 @@ namespace BornAgainM
         {
             public int Count = 0, TotalDamage = 0, TotalArmorDamage = 0;
             public int MinDamage = int.MaxValue, MaxDamage = 0;
-            public int CritCount = 0, CritDamage = 0, TrueCount = 0, TrueDamage = 0, DoTCount = 0;
+            public int CritCount = 0, CritDamage = 0, TrueCount = 0, TrueDamage = 0;
         }
 
         public class PlayerDamageStats
         {
             public int TotalDamage = 0, TotalArmorDamage = 0;
-            public int DirectDamage = 0, DoTDamage = 0, CritDamage = 0, TrueDamage = 0;
-            public int HitsCount = 0, DirectHits = 0, DoTHits = 0;
+            public int DirectDamage = 0, CritDamage = 0, TrueDamage = 0;
+            public int HitsCount = 0, DirectHits = 0;
             public string ThreadName = "";
             public Dictionary<string, AttackInfo> AttacksByType = new Dictionary<string, AttackInfo>();
         }
@@ -141,7 +138,6 @@ namespace BornAgainM
             public uint TargetId;
             public string BossName;
             public string AttackType = "Unknown";
-            public bool IsDoT = false;
             public float QueuedAt;
             public const float MAX_AGE = 10f;
         }
@@ -207,14 +203,10 @@ namespace BornAgainM
                 {
                     newCount++;
                     string thr = playerThreadCache.TryGetValue(ch.EntityId, out var tt) ? tt : "?";
-                    MelonLogger.Msg($"[DamageMeter] New player: {ch.EntityName} (ID:{ch.EntityId}) thread:{thr}");
+                   // MelonLogger.Msg($"[DamageMeter] New player: {ch.EntityName} (ID:{ch.EntityId}) thread:{thr}");
                 }
             }
-            if (newCount > 0)
-            {
-                MelonLogger.Msg($"[DamageMeter] Cache: {newCount} new, total:{characterCache.Count}");
-                ProcessPendingQueue();
-            }
+            if (newCount > 0) ProcessPendingQueue();
         }
 
         private static void ProcessPendingQueue()
@@ -226,16 +218,13 @@ namespace BornAgainM
             {
                 if (now - pending.QueuedAt > PendingAttack.MAX_AGE)
                 {
-                    MelonLogger.Warning($"[DamageMeter] Pending expired owner={pending.OwnerId}, dropped.");
                     toRemove.Add(pending); continue;
                 }
                 if (!characterCache.TryGetValue(pending.OwnerId, out var character) || character == null) continue;
                 string attackerName = character.EntityName;
                 if (string.IsNullOrEmpty(attackerName)) { toRemove.Add(pending); continue; }
                 RecordDamage(pending.OwnerId, attackerName, pending.TargetId, pending.BossName,
-                    pending.Damage, pending.ArmorDamage, pending.TrueDamage, pending.Flags,
-                    pending.AttackType, pending.IsDoT);
-                MelonLogger.Msg($"[DamageMeter] Replayed pending for {attackerName}");
+                    pending.Damage, pending.ArmorDamage, pending.TrueDamage, pending.Flags, pending.AttackType);
                 toRemove.Add(pending);
             }
             foreach (var r in toRemove) PendingQueue.Remove(r);
@@ -244,8 +233,7 @@ namespace BornAgainM
         private static void RecordDamage(
             uint ownerId, string attackerName,
             uint targetId, string bossName,
-            int damage, int armorDamage, bool trueDamage, AttackFlags flags,
-            string attackType, bool isDoT)
+            int damage, int armorDamage, bool trueDamage, AttackFlags flags, string attackType)
         {
             uint bossInstanceId = targetId;
 
@@ -259,17 +247,13 @@ namespace BornAgainM
             {
                 BossAttackInfoDict[bossName][bossInstanceId] = new Dictionary<string, PlayerDamageStats>();
                 BossRunTimestamps[bossName][bossInstanceId] = Time.time;
-                MelonLogger.Msg($"[DamageMeter] New run '{bossName}' id:{bossInstanceId}");
             }
 
             if (!BossAttackInfoDict[bossName][bossInstanceId].ContainsKey(attackerName))
             {
                 BossAttackInfoDict[bossName][bossInstanceId][attackerName] = new PlayerDamageStats();
                 if (playerThreadCache.TryGetValue(ownerId, out string tn) && !string.IsNullOrEmpty(tn))
-                {
                     BossAttackInfoDict[bossName][bossInstanceId][attackerName].ThreadName = tn;
-                    MelonLogger.Msg($"[DamageMeter] {attackerName} thread saved: {tn}");
-                }
             }
 
             var stats = BossAttackInfoDict[bossName][bossInstanceId][attackerName];
@@ -283,18 +267,19 @@ namespace BornAgainM
             if (!stats.AttacksByType.ContainsKey(attackType))
                 stats.AttacksByType[attackType] = new AttackInfo();
             var ai = stats.AttacksByType[attackType];
-            ai.Count++; ai.TotalDamage += damage; ai.TotalArmorDamage += armorDamage;
+            ai.Count++;
+            ai.TotalDamage += damage;
+            ai.TotalArmorDamage += armorDamage;
             if (damage < ai.MinDamage) ai.MinDamage = damage;
             if (damage > ai.MaxDamage) ai.MaxDamage = damage;
             if (isCrit) { ai.CritCount++; ai.CritDamage += damage; }
             if (isTrueDmg) { ai.TrueCount++; ai.TrueDamage += damage; }
-            if (isDoT) ai.DoTCount++;
 
             stats.TotalDamage += damage;
             stats.TotalArmorDamage += armorDamage;
             stats.HitsCount++;
-            if (isDoT) { stats.DoTDamage += damage; stats.DoTHits++; }
-            else { stats.DirectDamage += damage; stats.DirectHits++; }
+            stats.DirectDamage += damage;
+            stats.DirectHits++;
             if (isCrit) stats.CritDamage += damage;
             if (isTrueDmg) stats.TrueDamage += damage;
         }
@@ -303,16 +288,10 @@ namespace BornAgainM
         {
             try
             {
-                // VÉRIFICATION 1: Instance valide
                 if (__instance == null || __instance.Pointer == IntPtr.Zero) return;
-
-                // VÉRIFICATION 2: Dégâts > 0 (l'attaque a touché)
                 if (__result <= 0) return;
-
-                // VÉRIFICATION 3: Attack valide
                 if (attack == null || attack.Pointer == IntPtr.Zero) return;
 
-                // VÉRIFICATION 4: C'est bien un boss
                 var entity = __instance.TryCast<Il2Cpp.Entity>();
                 if (entity == null) return;
                 if (!BossNames.Contains(entity.EntityName)) return;
@@ -322,35 +301,8 @@ namespace BornAgainM
                 int damage = __result;
                 int armorDamage = attack.ArmorDamage;
 
-                // VÉRIFICATION 5: LiveAttack valide
                 var la = attack.LiveAttack;
                 if (la == null || la.Pointer == IntPtr.Zero) return;
-
-                // VÉRIFICATION 6: L'attaque a bien touché la cible (vérifier Hits)
-                try
-                {
-                    var hits = la.Hits;
-                    if (hits == null || hits.Count == 0)
-                    {
-                        // L'attaque n'a touché personne, on l'ignore
-                        if (UnityEngine.Random.value < 0.02f) // Log 2% du temps
-                            MelonLogger.Msg($"[DamageMeter] MISS: Attack has no hits (owner:{la.OwnerId}, target:{targetId})");
-                        return;
-                    }
-
-                    // Vérifier que la cible actuelle est bien dans les Hits
-                    if (!hits.Contains(targetId))
-                    {
-                        // Cette cible spécifique n'a pas été touchée
-                        if (UnityEngine.Random.value < 0.02f)
-                            MelonLogger.Msg($"[DamageMeter] MISS: Target {targetId} not in hits list (owner:{la.OwnerId})");
-                        return;
-                    }
-                }
-                catch
-                {
-                    // Si on ne peut pas vérifier, on fait confiance à __result > 0
-                }
 
                 uint ownerId = la.OwnerId;
                 bool trueDamage = la.TrueDamage;
@@ -364,62 +316,34 @@ namespace BornAgainM
                 if (CountedAttacks.Contains(dedupKey)) return;
                 CountedAttacks.Add(dedupKey);
 
-                // Log debug pour vérifier le comptage (à désactiver plus tard)
-                if (UnityEngine.Random.value < 0.05f) // 5% de logs pour éviter le spam
-                {
-                    MelonLogger.Msg($"[DamageMeter] HIT: {bossName} by owner:{ownerId}, dmg:{damage}, armDmg:{armorDamage}, dedupKey:{dedupKey}");
-                }
-
-                bool isDoT = false;
                 string attackType = "Unknown";
                 var desc = la.AttackDescriptor;
 
                 if (desc != null)
                 {
-                    string ownerName = "";
-                    string effect = "";
-
-                    try
+                    var descOwner = la.AttackDescriptorOwner;
+                    if (descOwner != null && descOwner.Pointer != IntPtr.Zero)
                     {
-                        var descOwner = la.AttackDescriptorOwner;
-                        if (descOwner != null && descOwner.Pointer != IntPtr.Zero)
+                        string ownerName = descOwner.Name ?? "";
+                        string effect = desc.Effect ?? "";
+
+                        if (!string.IsNullOrEmpty(ownerName))
                         {
-                            ownerName = descOwner.Name;
+                            string cleanOwner = ownerName.Replace("_", " ").Trim();
+                            string cleanEffect = effect.Replace("_", " ").Trim();
+
+                            if (string.IsNullOrEmpty(effect) || effect == "Basic")
+                            {
+                                attackType = $"{cleanOwner} - Basic";
+                            }
+                            else
+                            {
+                                attackType = cleanEffect.Length > 0
+                                    ? $"{cleanOwner} - {cleanEffect}"
+                                    : $"{cleanOwner} - unknown";
+                            }
                         }
                     }
-                    catch { }
-
-                    try { effect = desc.Effect ?? ""; } catch { }
-
-                    // SOLUTION: Effect contient juste des noms techniques ("aoe", "smoke")
-                    // Utiliser ObjectDefinition.Name comme identifiant principal
-                    if (!string.IsNullOrEmpty(ownerName))
-                    {
-                        string cleanOwner = ownerName.Replace("_", " ").Trim();
-                        string cleanEffect = effect.Replace("_", " ").Trim();
-
-                        // Pour TOUTES les attaques, utiliser "Owner - Effect"
-                        // C'est le seul moyen de différencier car Effect seul n'est pas descriptif
-                        if (string.IsNullOrEmpty(effect) || effect == "Basic")
-                        {
-                            attackType = $"{cleanOwner} - Basic";
-                        }
-                        else
-                        {
-                            attackType = $"{cleanOwner} - {cleanEffect}";
-                        }
-                    }
-                    else
-                    {
-                        // Pas d'owner, utiliser juste l'effet (peu probable)
-                        attackType = effect.Replace("_", " ").Trim();
-                        if (string.IsNullOrEmpty(attackType)) attackType = "Unknown";
-                    }
-
-                    if (desc.OnHitStatusEffects?.Count > 0) isDoT = true;
-                    string eff = effect.ToLower();
-                    if (eff.Contains("burn") || eff.Contains("poison") || eff.Contains("bleed") || eff.Contains("dot"))
-                        isDoT = true;
                 }
 
                 UpdateCharacterCache();
@@ -453,10 +377,8 @@ namespace BornAgainM
                         TargetId = targetId,
                         BossName = bossName,
                         AttackType = attackType,
-                        IsDoT = isDoT,
                         QueuedAt = Time.time
                     });
-                    MelonLogger.Warning($"[DamageMeter] Owner {ownerId} not found, queued ({PendingQueue.Count} pending)");
                     return;
                 }
 
@@ -474,22 +396,26 @@ namespace BornAgainM
                         TargetId = targetId,
                         BossName = bossName,
                         AttackType = attackType,
-                        IsDoT = isDoT,
                         QueuedAt = Time.time
                     });
                     return;
                 }
 
                 RecordDamage(ownerId, attackerName, targetId, bossName,
-                    damage, armorDamage, trueDamage, flags, attackType, isDoT);
+                    damage, armorDamage, trueDamage, flags, attackType);
             }
             catch (Exception ex) { MelonLogger.Error($"[HitBy] {ex.Message}"); }
         }
 
         public static void ResetStats()
         {
-            BossAttackInfoDict.Clear(); BossRunTimestamps.Clear(); CountedAttacks.Clear(); PendingQueue.Clear();
-            characterCache.Clear(); playerThreadCache.Clear(); lastCacheScan = 0f;
+            BossAttackInfoDict.Clear();
+            BossRunTimestamps.Clear();
+            CountedAttacks.Clear();
+            PendingQueue.Clear();
+            characterCache.Clear();
+            playerThreadCache.Clear();
+            lastCacheScan = 0f;
         }
     }
 
@@ -514,7 +440,6 @@ namespace BornAgainM
                     string threadName = ResolveThreadName(defId);
                     if (string.IsNullOrEmpty(threadName)) continue;
                     LiveAttackDamage.playerThreadCache[entityId] = threadName;
-                    MelonLogger.Msg($"[BlessingsPatch] {__instance.EntityName} slot={i} defId={defId} -> {threadName}");
                     foreach (var bossDict in LiveAttackDamage.BossAttackInfoDict.Values)
                         foreach (var instDict in bossDict.Values)
                             if (instDict.TryGetValue(__instance.EntityName, out var stats) && string.IsNullOrEmpty(stats.ThreadName))
@@ -550,7 +475,6 @@ namespace BornAgainM
                 var postfix = typeof(CharacterBlessingsDataPatch).GetMethod("Postfix",
                     System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
                 harmony.Patch(target, postfix: new HarmonyLib.HarmonyMethod(postfix));
-                MelonLogger.Msg("[DamageMeter] BlessingsData patch registered.");
             }
             catch (Exception ex) { MelonLogger.Error($"[BlessingsPatchRegistrar] {ex.Message}"); }
         }
@@ -622,7 +546,7 @@ namespace BornAgainM
             hr.anchorMin = new Vector2(0, 1); hr.anchorMax = new Vector2(1, 1);
             hr.pivot = new Vector2(.5f, 1); hr.sizeDelta = new Vector2(0, h);
             hdr.AddComponent<Image>().color = bgColor;
-            var to = new GameObject("Text"); to.transform.SetParent(hdr.transform, false);
+            var to = new GameObject("Text"); to.transform.SetParent(hr.transform, false);
             var tr = to.AddComponent<RectTransform>();
             tr.anchorMin = Vector2.zero; tr.anchorMax = Vector2.one; tr.sizeDelta = Vector2.zero;
             var t = to.AddComponent<Text>();
@@ -1011,7 +935,6 @@ namespace BornAgainM
             foreach (var el in playerListElements.Values) if (el) UnityEngine.Object.Destroy(el);
             playerListElements.Clear();
 
-            // Méthode directe et plus efficace pour lister les joueurs
             var characters = GameObject.FindObjectsOfType<Character>();
             if (characters == null || characters.Length == 0) return;
 
@@ -1021,12 +944,9 @@ namespace BornAgainM
                 if (c == null || c.Pointer == IntPtr.Zero) continue;
                 if (string.IsNullOrEmpty(c.EntityName)) continue;
                 validPlayers.Add(c);
-
-                // Mettre à jour les stats du joueur
                 PlayerStatsTracker.UpdateStats(c);
             }
 
-            // Trier par nom et éliminer les doublons
             var sorted = validPlayers
                 .GroupBy(c => c.EntityName)
                 .Select(g => g.First())
@@ -1044,7 +964,6 @@ namespace BornAgainM
                 playerListElements[id] = el;
                 el.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -28f - i * 13f);
 
-                // Highlight si sélectionné - mettre à jour le background Image
                 var bgImg = el.GetComponent<Image>();
                 if (bgImg != null)
                 {
@@ -1069,14 +988,12 @@ namespace BornAgainM
             r.anchorMin = new Vector2(0, 1); r.anchorMax = new Vector2(1, 1);
             r.pivot = new Vector2(.5f, 1); r.sizeDelta = new Vector2(-8, 12);
 
-            // Background avec raycast activé pour les clics
             var bgImg = obj.AddComponent<Image>();
             bgImg.color = new Color(.08f, .12f, .20f, .88f);
-            bgImg.raycastTarget = true; // IMPORTANT pour que le Button fonctionne
+            bgImg.raycastTarget = true;
 
-            // Ajouter le bouton pour rendre l'élément cliquable
             var btn = obj.AddComponent<Button>();
-            btn.targetGraphic = bgImg; // Le background devient le target visuel du bouton
+            btn.targetGraphic = bgImg;
             var nav = btn.navigation; nav.mode = Navigation.Mode.None; btn.navigation = nav;
             btn.onClick.AddListener((UnityAction)(() => { ClearFocus(); OnPlayerListClick(id); }));
 
@@ -1096,7 +1013,6 @@ namespace BornAgainM
         {
             if (selectedOnlinePlayerId == playerId)
             {
-                // Toggle le panneau de stats
                 bool active = playerStatsPanel && playerStatsPanel.activeSelf;
                 if (playerStatsPanel) playerStatsPanel.SetActive(!active);
                 return;
@@ -1105,7 +1021,6 @@ namespace BornAgainM
             selectedOnlinePlayerId = playerId;
             if (playerStatsPanel)
             {
-                // Position pour le mode Players (-168 pour être à côté du panneau Players)
                 playerStatsPanel.GetComponent<RectTransform>().anchoredPosition = new Vector2(-168, 85);
                 playerStatsPanel.SetActive(true);
             }
@@ -1116,11 +1031,9 @@ namespace BornAgainM
         {
             if (!playerStatsPanel || selectedOnlinePlayerId == 0) return;
 
-            // Nettoyer les anciens éléments
             foreach (var e in playerStatsElements.Values) if (e) UnityEngine.Object.Destroy(e);
             playerStatsElements.Clear();
 
-            // Récupérer les stats du joueur via PlayerStatsTracker
             var stats = PlayerStatsTracker.GetLoggedStats(selectedOnlinePlayerId);
             if (stats == null)
             {
@@ -1128,7 +1041,6 @@ namespace BornAgainM
                 return;
             }
 
-            // Mettre à jour le header
             var hdrObj = playerStatsPanel.transform.Find("Header");
             if (hdrObj != null)
             {
@@ -1152,7 +1064,6 @@ namespace BornAgainM
             float yOffset = -30f;
             int index = 0;
 
-            // Ordre spécifique des stats : MaxHealth, Strength, Defense, Dexterity, Speed, Vigor
             var statOrder = new List<StatType>
             {
                 StatType.MaxHealth,
@@ -1163,7 +1074,6 @@ namespace BornAgainM
                 StatType.Vigor
             };
 
-            // Afficher les stats primaires dans l'ordre demandé
             foreach (var statType in statOrder)
             {
                 if (!stats.Stats.TryGetValue(statType, out var values)) continue;
@@ -1176,7 +1086,6 @@ namespace BornAgainM
                 index++;
             }
 
-            // Afficher les autres stats qui ne sont pas dans la liste principale
             var remainingStats = stats.Stats
                 .Where(kvp => !statOrder.Contains(kvp.Key))
                 .OrderBy(kvp => kvp.Key.ToString())
@@ -1210,7 +1119,6 @@ namespace BornAgainM
                 : new Color(.06f, .09f, .16f, .90f);
             bg.GetComponent<Image>().raycastTarget = false;
 
-            // Nom de la stat (à gauche) - 40% de largeur
             var nameObj = new GameObject("Name"); nameObj.transform.SetParent(obj.transform, false);
             var nameRect = nameObj.AddComponent<RectTransform>();
             nameRect.anchorMin = new Vector2(0f, 0f); nameRect.anchorMax = new Vector2(0.40f, 1f);
@@ -1221,7 +1129,6 @@ namespace BornAgainM
             nameText.alignment = TextAnchor.MiddleLeft; nameText.fontStyle = FontStyle.Bold;
             nameText.text = statName; nameText.raycastTarget = false;
 
-            // Base value (centre) - 30% de largeur
             var baseObj = new GameObject("Base"); baseObj.transform.SetParent(obj.transform, false);
             var baseRect = baseObj.AddComponent<RectTransform>();
             baseRect.anchorMin = new Vector2(0.40f, 0f); baseRect.anchorMax = new Vector2(0.70f, 1f);
@@ -1232,7 +1139,6 @@ namespace BornAgainM
             baseText.alignment = TextAnchor.MiddleCenter; baseText.text = baseValue.ToString();
             baseText.raycastTarget = false;
 
-            // Functional value (droite) - 30% de largeur
             var funcObj = new GameObject("Functional"); funcObj.transform.SetParent(obj.transform, false);
             var funcRect = funcObj.AddComponent<RectTransform>();
             funcRect.anchorMin = new Vector2(0.70f, 0f); funcRect.anchorMax = new Vector2(1f, 1f);
@@ -1377,7 +1283,7 @@ namespace BornAgainM
             br.anchorMin = Vector2.zero; br.anchorMax = Vector2.one; br.sizeDelta = new Vector2(-2, -2);
             var bgImg = bg.AddComponent<Image>();
             bgImg.color = new Color(.08f, .12f, .20f, .90f);
-            bgImg.raycastTarget = true; // IMPORTANT pour que le Button fonctionne
+            bgImg.raycastTarget = true;
 
             var bar = new GameObject("DmgBar"); bar.transform.SetParent(obj.transform, false);
             var barR = bar.AddComponent<RectTransform>();
@@ -1425,7 +1331,6 @@ namespace BornAgainM
             selectedPlayerName = playerName;
             if (detailsPanel) detailsPanel.SetActive(true);
 
-            // Trouver l'EntityId du joueur par son nom
             uint foundId = 0;
             foreach (var kvp in LiveAttackDamage.characterCache)
             {
@@ -1436,9 +1341,6 @@ namespace BornAgainM
                 }
             }
 
-            MelonLogger.Msg($"[DamageMeterUI] OnPlayerButtonClick: {playerName}, found EntityId: {foundId}");
-
-            // Stocker l'ID pour pouvoir l'utiliser plus tard avec le bouton Stats
             if (foundId != 0)
             {
                 selectedOnlinePlayerId = foundId;
@@ -1448,7 +1350,6 @@ namespace BornAgainM
                 MelonLogger.Warning($"[DamageMeterUI] Could not find EntityId for player: {playerName}");
             }
 
-            // Fermer le panneau stats s'il était ouvert
             if (playerStatsPanel) playerStatsPanel.SetActive(false);
 
             UpdateStatsPanel();
@@ -1482,7 +1383,6 @@ namespace BornAgainM
                 }
             }
 
-            // Créer le header des colonnes
             var colHdrObj = detailsPanel.transform.Find("AttackColHeader");
             if (colHdrObj == null)
             {
@@ -1510,7 +1410,6 @@ namespace BornAgainM
                 attackDetailsElements[sorted[i].Key + i] = el;
             }
 
-            // Ajouter le bouton STATS en bas
             float bottomY = -43f - sorted.Count * 18f - 10f;
             var statsBtn = detailsPanel.transform.Find("StatsButton");
             if (statsBtn == null)
@@ -1525,13 +1424,12 @@ namespace BornAgainM
 
                 var btnImg = btnObj.AddComponent<Image>();
                 btnImg.color = new Color(.25f, .45f, .65f, .95f);
-                btnImg.raycastTarget = true; // IMPORTANT pour que le bouton soit cliquable
+                btnImg.raycastTarget = true;
 
                 var btn = btnObj.AddComponent<Button>();
-                btn.targetGraphic = btnImg; // Lier l'image au bouton
+                btn.targetGraphic = btnImg;
                 var nav = btn.navigation; nav.mode = Navigation.Mode.None; btn.navigation = nav;
                 btn.onClick.AddListener((UnityAction)(() => {
-                    MelonLogger.Msg("[DamageMeterUI] STATS button clicked!");
                     ClearFocus();
                     OnShowPlayerStatsClick();
                 }));
@@ -1556,18 +1454,12 @@ namespace BornAgainM
                 statsBtn = btnObj.transform;
             }
             statsBtn.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, bottomY);
-            statsBtn.gameObject.SetActive(true); // S'assurer qu'il est visible
+            statsBtn.gameObject.SetActive(true);
         }
 
         private void OnShowPlayerStatsClick()
         {
-            MelonLogger.Msg($"[DamageMeterUI] OnShowPlayerStatsClick called, selectedOnlinePlayerId={selectedOnlinePlayerId}");
-
-            if (selectedOnlinePlayerId == 0)
-            {
-                MelonLogger.Warning("[DamageMeterUI] selectedOnlinePlayerId is 0, cannot show stats");
-                return;
-            }
+            if (selectedOnlinePlayerId == 0) return;
 
             bool isActive = playerStatsPanel && playerStatsPanel.activeSelf;
 
@@ -1575,21 +1467,14 @@ namespace BornAgainM
             {
                 if (!isActive)
                 {
-                    // Position pour le mode BossList (-858 pour être à gauche du panneau Details)
                     playerStatsPanel.GetComponent<RectTransform>().anchoredPosition = new Vector2(-858, 85);
                     playerStatsPanel.SetActive(true);
                     UpdatePlayerStatsPanel();
-                    MelonLogger.Msg("[DamageMeterUI] Stats panel opened");
                 }
                 else
                 {
                     playerStatsPanel.SetActive(false);
-                    MelonLogger.Msg("[DamageMeterUI] Stats panel closed");
                 }
-            }
-            else
-            {
-                MelonLogger.Warning("[DamageMeterUI] playerStatsPanel is null");
             }
         }
 
@@ -1612,7 +1497,6 @@ namespace BornAgainM
             float pct = totalDmg > 0 ? (float)info.TotalDamage / totalDmg * 100f : 0f;
             int avg = info.Count > 0 ? info.TotalDamage / info.Count : 0;
 
-            // Nom de l'attaque (complet, sans troncature)
             MakeAttackColText(obj, "ColName", 0f, 0.35f, TextAnchor.MiddleLeft, 4, 0).text = attackType;
             MakeAttackColText(obj, "ColHits", 0.35f, 0.47f, TextAnchor.MiddleRight, 0, -2).text = info.Count.ToString();
 
@@ -1620,7 +1504,6 @@ namespace BornAgainM
             dmgText.text = Fmt(info.TotalDamage);
             dmgText.color = new Color(.85f, .95f, 1f, 1f);
 
-            // Format avec point décimal (culture invariante)
             MakeAttackColText(obj, "ColPct", 0.65f, 0.73f, TextAnchor.MiddleRight, 0, -2).text = pct.ToString("F1", System.Globalization.CultureInfo.InvariantCulture) + "%";
             MakeAttackColText(obj, "ColAvg", 0.73f, 0.88f, TextAnchor.MiddleRight, 0, -2).text = Fmt(avg);
 
@@ -1662,7 +1545,6 @@ namespace BornAgainM
             canvas?.SetActive(isVisible);
             buttonCanvas?.SetActive(true);
             UpdateBtnColors();
-            MelonLogger.Msg(isVisible ? "Damage Meter ON" : "Damage Meter OFF");
         }
     }
 

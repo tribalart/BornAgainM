@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Linq;
-using System.Collections.Generic;
 using System.Threading.Tasks;
 using MelonLoader;
 using UnityEngine;
@@ -12,6 +11,10 @@ using Il2CppRonin.Model.Simulation.Components;
 using Il2CppRonin.Model.Enums;
 using Il2CppInterop.Runtime;
 using Il2CppRonin.Model.Data;
+using Il2CppRonin.Model.GameActions;
+using System.Reflection;
+using Il2CppSystem.Linq;
+
 
 [assembly: MelonInfo(typeof(BornAgainM.Core), "BornAgainM", "2.0.9", "Toi")]
 [assembly: MelonGame("Unnamed Studios", "Born Again")]
@@ -22,7 +25,7 @@ namespace BornAgainM
     public class Core : MelonMod
     {
         private SortBank sortBank;
-
+        private BossMonitor bossMonitor;
         private bool isRecording = false;
         private float startTime;
         private const float DPS_DURATION = 20f;
@@ -68,11 +71,17 @@ namespace BornAgainM
             MelonLogger.Msg("DPS Meter (toggle with NumKey+)");
             MelonLogger.Msg("Damage Meter UI auto-enabled");
 
+
+
+
+
+
+
             damageMeterUI = new DamageMeterUI();
             damageMeterUI.CreateUI();
-
+            bossMonitor = new BossMonitor(); 
             sortBank = new SortBank();
-
+          
             // Appliquer les patches Harmony
             var harmony = new HarmonyLib.Harmony("com.bornagainm.mod");
             harmony.PatchAll();
@@ -80,6 +89,7 @@ namespace BornAgainM
             try
             {
                 BlessingsPatchRegistrar.Register(harmony);
+                
                 MelonLogger.Msg("Harmony patches applied successfully");
             }
             catch (Exception ex)
@@ -90,19 +100,29 @@ namespace BornAgainM
 
         public override void OnUpdate()
         {
-            // Initialiser l'UI au premier update
+           
             if (initDamageMeterUI == 0)
-                damageMeterUI.Toggle();
+            damageMeterUI.Toggle();
             initDamageMeterUI = 1;
+            bossMonitor?.Update();
 
-            // Mettre à jour l'UI du Damage Meter
+          
             damageMeterUI.UpdateUI();
 
+            if (Input.GetKeyDown(KeyCode.Keypad3))
+            {
+   
+            }
             // Gestion du DPS Meter (NumPad+)
             if (Input.GetKeyDown(KeyCode.KeypadPlus))
             {
+              
+
+
+
                 if (!isRecording)
                     StartDPS();
+
                 else
                     StopDPS();
             }
@@ -116,11 +136,13 @@ namespace BornAgainM
             }
             CaptureAttacks();
         }
-
-        public override void OnLateUpdate()
+        public override void OnGUI()
         {
+            bossMonitor?.OnGUI();
         }
+        
 
+      
         private void StartDPS()
         {
             isRecording = true;
@@ -141,6 +163,7 @@ namespace BornAgainM
                 var localPlayer = GameObject.FindObjectOfType<Character>();
                 if (localPlayer == null) return;
                 long localPlayerId = localPlayer.PlayerId;
+               
 
                 var type = Il2CppSystem.Type.GetTypeFromHandle(Il2CppType.Of<Simulation>().TypeHandle);
                 var field = type.GetField("_attacks",
