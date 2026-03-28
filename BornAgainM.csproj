@@ -413,6 +413,7 @@
 
 	<ItemGroup>
 		<Compile Include="BankManager.cs" />
+		<Compile Include="BossGui.cs" />
 		<Compile Include="DamageM.cs" />
 		<Compile Include="Core1.cs" />
 	</ItemGroup>
