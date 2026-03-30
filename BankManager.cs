@@ -45,7 +45,8 @@ namespace BornAgainM
                 MelonLogger.Msg("BankMenu is null");
                 return;
             }
-            bool isOpen = bankMenu.gameObject.activeInHierarchy;
+        
+           bool isOpen = bankMenu.gameObject.activeInHierarchy;
             MelonLogger.Msg(isOpen
                 ? "Bank is OPEN"
                 : "Bank is CLOSED");

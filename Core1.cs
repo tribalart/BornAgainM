@@ -33,6 +33,8 @@ namespace BornAgainM
         private readonly Dictionary<uint, PlayerDPS> players = new();
         private DamageMeterUI damageMeterUI;
         private int initDamageMeterUI = 0;
+   
+       
 
         private class AttackInfo
         {
@@ -76,7 +78,7 @@ namespace BornAgainM
 
 
 
-
+          
             damageMeterUI = new DamageMeterUI();
             damageMeterUI.CreateUI();
             bossMonitor = new BossMonitor(); 
@@ -109,10 +111,8 @@ namespace BornAgainM
           
             damageMeterUI.UpdateUI();
 
-            if (Input.GetKeyDown(KeyCode.Keypad3))
-            {
-   
-            }
+          
+
             // Gestion du DPS Meter (NumPad+)
             if (Input.GetKeyDown(KeyCode.KeypadPlus))
             {
