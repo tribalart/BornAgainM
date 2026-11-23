@@ -269,7 +269,9 @@ namespace BornAgainM
     internal class BossDamageNative : ISideOverlay
     {
         private float lastRefresh;
-        private const float UI_INTERVAL = 0.25f;
+        // Boss fights last tens of seconds, so once per second is plenty; a faster rebuild only
+        // churns the rows (and can destroy a row mid-click). Clicks refresh immediately anyway.
+        private const float UI_INTERVAL = 1f;
 
         private GameObject canvas;
         private GameObject buttonCanvas;
@@ -506,7 +508,7 @@ namespace BornAgainM
                 bool open = g.Name == openName;
                 string gname = g.Name;
                 var header = Row(bossList, y, 25f, open ? new Color(.12f, .28f, .48f, .95f) : new Color(.08f, .12f, .20f, .9f),
-                                 () => { openName = (openName == gname) ? "" : gname; RefreshUI(); });
+                                 () => { try { EventSystem.current?.SetSelectedGameObject(null); } catch { } openName = (openName == gname) ? "" : gname; RefreshUI(); });
                 Col(header, 0f, .72f, TextAlignmentOptions.Left, 13, new Color(.85f, .95f, 1f, 1f),
                     (open ? "▼ " : "▶ ") + Trim(g.Name, 16) + (g.Instances.Count > 1 ? $"  ({g.Instances.Count})" : ""));
                 Col(header, .72f, 1f, TextAlignmentOptions.Right, 13, new Color(.55f, .65f, .9f, 1f), BossHitPatch.Fmt(g.Total));
@@ -532,13 +534,19 @@ namespace BornAgainM
 
         private void OnInstanceClick(string bossName, uint instanceId)
         {
+            try { EventSystem.current?.SetSelectedGameObject(null); } catch { }
+
+            // Same id: toggle the stats panel on/off.
             if (selectedInstance == instanceId && selectedBossName == bossName)
             {
-                bool a = statsPanel.activeSelf;
-                statsPanel.SetActive(!a);
-                if (!a) { selectedPlayer = ""; detailsPanel.SetActive(false); }
+                bool show = !statsPanel.activeSelf;
+                statsPanel.SetActive(show);
+                if (!show) { selectedPlayer = ""; detailsPanel.SetActive(false); }
+                RefreshUI();
                 return;
             }
+
+            // Different id: switch to it.
             selectedBossName = bossName;
             selectedInstance = instanceId;
             selectedPlayer = "";
@@ -597,10 +605,13 @@ namespace BornAgainM
 
         private void OnPlayerClick(string playerName)
         {
+            try { EventSystem.current?.SetSelectedGameObject(null); } catch { }
+
+            // Same player: toggle the details panel on/off.
             if (selectedPlayer == playerName)
             {
-                bool a = detailsPanel.activeSelf;
-                detailsPanel.SetActive(!a);
+                detailsPanel.SetActive(!detailsPanel.activeSelf);
+                RefreshUI();
                 return;
             }
             selectedPlayer = playerName;
