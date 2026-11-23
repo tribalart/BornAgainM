@@ -414,6 +414,7 @@
 
 	<ItemGroup>
 		<Compile Include="BankManager.cs" />
+		<Compile Include="SideOverlays.cs" />
 		<Compile Include="BossGuiNative.cs" />
 		<Compile Include="OnlinePlayersNative.cs" />
 		<Compile Include="BossDamageNative.cs" />

@@ -1,42 +1,281 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Globalization;
 using MelonLoader;
+using HarmonyLib;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.Events;
 using UnityEngine.EventSystems;
 using Il2Cpp;
-using Il2CppSystem.Linq;
-using Il2CppRonin.Model.Simulation;
 using Il2CppRonin.Model.Simulation.Components;
-using Il2CppInterop.Runtime;
+using Il2CppRonin.Model.Definitions;
+using Il2CppRonin.Model.Enums;
 using Il2CppTMPro;
 
 namespace BornAgainM
 {
     /// <summary>
-    /// Boss damage meter: a consultable list of bosses, each showing the per-attacker damage
-    /// breakdown ("who did how much"). Damage is attributed by scanning the simulation's attack
-    /// buffer (<c>Simulation._attacks</c>): each <c>LiveAttack</c> carries the attacker
-    /// (<c>OwnerId</c>), its <c>Damage</c>, and the set of hit entities (<c>Hits</c>, a
-    /// HashSet&lt;uint&gt; of EntityIds). When a hit entity is a known boss, the attack's damage is
-    /// added to that boss under its attacker.
+    /// Harmony patch that records damage dealt to bosses, broken down boss → instance → player →
+    /// attack type.
     ///
-    /// Shown in its own panel, toggled from its own button. Player identity (names) is resolved
-    /// from the live characters; the stats/equipment detail view is intended to be shared with
-    /// OnlinePlayersNative in a later step.
+    /// It hooks <c>WorldObject.HitBy</c>: the patched instance is the entity receiving the hit and
+    /// <c>__result</c> is the real damage dealt (post-mitigation). When that entity is a known boss
+    /// (by name), the attacker is resolved from <c>LiveAttack.OwnerId</c> and the hit is recorded
+    /// under that boss instance, that attacker, and the attack type. Attacker names are resolved
+    /// from the live characters, with a pending queue for hits whose name is not available yet.
     /// </summary>
-    internal class BossDamageNative
+    [HarmonyPatch(typeof(Il2Cpp.WorldObject), nameof(Il2Cpp.WorldObject.HitBy))]
+    internal static class BossHitPatch
     {
-        private float lastScan;
-        private const float UI_INTERVAL = 0.25f;   // UI refresh throttle (capture runs every frame)
+        /// <summary>Aggregated stats for one attack type dealt by a player to a boss instance.</summary>
+        internal class AttackInfo
+        {
+            public int Count, TotalDamage, TotalArmorDamage;
+            public int MinDamage = int.MaxValue, MaxDamage;
+            public int CritCount, CritDamage, TrueCount, TrueDamage;
+        }
+
+        /// <summary>One attacker's damage to a boss instance, split by attack type.</summary>
+        internal class PlayerStats
+        {
+            public long TotalDamage, TotalArmorDamage;
+            public readonly Dictionary<string, AttackInfo> AttacksByType = new();
+            public int MaxHit { get { int m = 0; foreach (var a in AttacksByType.Values) if (a.MaxDamage > m) m = a.MaxDamage; return m; } }
+        }
+
+        /// <summary>Damage dealt to one boss instance, per attacker.</summary>
+        internal class BossInstance
+        {
+            public uint id;
+            public string name = "???";
+            public readonly Dictionary<string, PlayerStats> byPlayer = new();
+            public float lastSeen;
+            public long Total { get { long t = 0; foreach (var p in byPlayer.Values) t += p.TotalDamage; return t; } }
+        }
+
+        internal static readonly Dictionary<uint, BossInstance> Bosses = new();
+        internal static string LocalPlayerName = "";
+
+        // Known boss names; only damage dealt to these entities is tracked.
+        internal static readonly HashSet<string> BossNames = new()
+        {
+            "Phoenix","Hahn","Forest Guardian","Mountain Dragon","Yoku-Ba","Bhognin","Umbra",
+            "Vika-Minci","Grug-Mant","Pirate Captain","Kitsune Momoko","Giant Boar","Mysterious Head",
+            "Lord Hammurabi","Lord Cicero","Queoti Queen","Sand Eater","Pogger Beast Tamer",
+            "Giant Gloop","Saint Klaus","Wapo Helmsman","Gorilla King","Akuji Mozuki","Kobukin King",
+            "Akuji Saikami","Hill Giant Shaman","Dokai Chancellor","Stone Giant","Lady Valeria",
+            "Tiko Tikatu","Shroom Conglomerate","Onyx","Bullfrog Shaman","Hydra Head",
+            "Mounted Knight","Djinn","Bubra Elephant","Mannah the Malevolent"
+        };
+
+        // Attacker name resolution.
+        private static readonly Dictionary<uint, Character> charCache = new();
+        private static readonly HashSet<ulong> counted = new();
+        private const int COUNTED_CAP = 20000;
+
+        private class Pending
+        {
+            public uint ownerId, bossId; public string bossName, attackType;
+            public int damage, armorDamage; public bool isCrit, isTrue; public float at;
+        }
+        private static readonly List<Pending> pending = new();
+        private const float PENDING_MAX_AGE = 10f;
+
+        private static float lastCacheScan;
+        private const float CACHE_SCAN_INTERVAL = 0.5f;
+
+        internal static void Reset()
+        {
+            Bosses.Clear();
+            counted.Clear();
+            pending.Clear();
+        }
+
+        internal static void UpdateCache()
+        {
+            float now = Time.time;
+            if (now - lastCacheScan < CACHE_SCAN_INTERVAL) return;
+            lastCacheScan = now;
+
+            try
+            {
+                var all = GameObject.FindObjectsOfType<Character>();
+                var local = GameObject.FindObjectOfType<Character>();
+                if (local != null) { try { var n = local.EntityName; if (!string.IsNullOrEmpty(n)) LocalPlayerName = n; } catch { } }
+                foreach (var ch in all)
+                {
+                    if (ch == null || ch.Pointer == IntPtr.Zero) continue;
+                    uint id; try { id = ch.EntityId; } catch { continue; }
+                    if (id != 0) charCache[id] = ch;
+                }
+            }
+            catch { }
+
+            ProcessPending();
+        }
+
+        private static void ProcessPending()
+        {
+            if (pending.Count == 0) return;
+            float now = Time.time;
+            var done = new List<Pending>();
+            foreach (var p in pending)
+            {
+                if (now - p.at > PENDING_MAX_AGE) { done.Add(p); continue; }
+                if (!charCache.TryGetValue(p.ownerId, out var ch) || ch == null) continue;
+                string nm = null; try { nm = ch.EntityName; } catch { }
+                if (string.IsNullOrEmpty(nm)) continue;
+                Record(p.bossId, p.bossName, nm, p.attackType, p.damage, p.armorDamage, p.isCrit, p.isTrue);
+                done.Add(p);
+            }
+            foreach (var d in done) pending.Remove(d);
+        }
+
+        private static BossInstance GetBoss(uint bossId, string bossName)
+        {
+            if (!Bosses.TryGetValue(bossId, out var be))
+            {
+                be = new BossInstance { id = bossId, name = bossName };
+                Bosses[bossId] = be;
+            }
+            be.name = bossName;
+            be.lastSeen = Time.time;
+            return be;
+        }
+
+        private static void Record(uint bossId, string bossName, string attackerName, string attackType,
+            int damage, int armorDamage, bool isCrit, bool isTrue)
+        {
+            var be = GetBoss(bossId, bossName);
+            if (!be.byPlayer.TryGetValue(attackerName, out var ps))
+            {
+                ps = new PlayerStats();
+                be.byPlayer[attackerName] = ps;
+            }
+
+            if (!ps.AttacksByType.TryGetValue(attackType, out var ai))
+            {
+                ai = new AttackInfo();
+                ps.AttacksByType[attackType] = ai;
+            }
+            ai.Count++;
+            ai.TotalDamage += damage;
+            ai.TotalArmorDamage += armorDamage;
+            if (damage < ai.MinDamage) ai.MinDamage = damage;
+            if (damage > ai.MaxDamage) ai.MaxDamage = damage;
+            if (isCrit) { ai.CritCount++; ai.CritDamage += damage; }
+            if (isTrue) { ai.TrueCount++; ai.TrueDamage += damage; }
+
+            ps.TotalDamage += damage;
+            ps.TotalArmorDamage += armorDamage;
+        }
+
+        private static string ResolveAttackType(LiveAttack la)
+        {
+            try
+            {
+                var desc = la.AttackDescriptor;
+                if (desc == null) return "Unknown";
+                var descOwner = la.AttackDescriptorOwner;
+                if (descOwner == null || descOwner.Pointer == IntPtr.Zero) return "Unknown";
+                string ownerName = descOwner.Name ?? "";
+                string effect = desc.Effect ?? "";
+                if (string.IsNullOrEmpty(ownerName)) return "Unknown";
+                string cleanOwner = ownerName.Replace("_", " ").Trim();
+                string cleanEffect = effect.Replace("_", " ").Trim();
+                if (string.IsNullOrEmpty(effect) || effect == "Basic") return $"{cleanOwner} - Basic";
+                return cleanEffect.Length > 0 ? $"{cleanOwner} - {cleanEffect}" : $"{cleanOwner} - unknown";
+            }
+            catch { return "Unknown"; }
+        }
+
+        static void Postfix(Il2Cpp.WorldObject __instance, Il2Cpp.Attack attack, bool fromPlayer, int __result)
+        {
+            try
+            {
+                if (__instance == null || __instance.Pointer == IntPtr.Zero) return;
+                if (__result <= 0 || attack == null || attack.Pointer == IntPtr.Zero) return;
+
+                var entity = __instance.TryCast<Il2Cpp.Entity>();
+                if (entity == null) return;
+                string bossName = null; try { bossName = entity.EntityName; } catch { }
+                if (string.IsNullOrEmpty(bossName) || !BossNames.Contains(bossName)) return;
+
+                uint bossId = entity.EntityId;
+
+                var la = attack.LiveAttack;
+                if (la == null || la.Pointer == IntPtr.Zero) return;
+                uint ownerId = la.OwnerId;
+
+                ulong dedup = la.Id != 0 ? la.Id : (((ulong)ownerId << 32) | la.StartTime);
+                if (counted.Contains(dedup)) return;
+                if (counted.Count > COUNTED_CAP) counted.Clear();
+                counted.Add(dedup);
+
+                int armorDamage = 0; try { armorDamage = attack.ArmorDamage; } catch { }
+                bool isTrue = false; try { isTrue = la.TrueDamage; } catch { }
+                bool isCrit = false;
+                try
+                {
+                    var flags = attack.Flags;
+                    isCrit = (flags & AttackFlags.CriticalStrike) != 0;
+                    isTrue = isTrue || (flags & AttackFlags.TrueDamage) != 0;
+                }
+                catch { }
+                string attackType = ResolveAttackType(la);
+
+                UpdateCache();
+
+                if (!charCache.TryGetValue(ownerId, out var ch) || ch == null || ch.Pointer == IntPtr.Zero)
+                {
+                    try { ch = GameObject.FindObjectsOfType<Character>().FirstOrDefault(c => c != null && c.Pointer != IntPtr.Zero && c.EntityId == ownerId); } catch { ch = null; }
+                    if (ch != null) charCache[ownerId] = ch;
+                }
+
+                string attackerName = null; try { if (ch != null) attackerName = ch.EntityName; } catch { }
+                if (string.IsNullOrEmpty(attackerName))
+                {
+                    // Keep the boss instance visible even before the attacker name resolves.
+                    GetBoss(bossId, bossName);
+                    pending.Add(new Pending
+                    {
+                        ownerId = ownerId, bossId = bossId, bossName = bossName, attackType = attackType,
+                        damage = __result, armorDamage = armorDamage, isCrit = isCrit, isTrue = isTrue, at = Time.time
+                    });
+                    return;
+                }
+
+                Record(bossId, bossName, attackerName, attackType, __result, armorDamage, isCrit, isTrue);
+            }
+            catch (Exception ex) { MelonLogger.Error($"[BossHitPatch] {ex.Message}"); }
+        }
+
+        internal static string Fmt(long n) => n.ToString("N0", CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Boss damage meter UI (ported from the legacy meter): three right-edge panels that drill down
+    /// boss → instance → players → attack types.
+    ///   1. Boss list (same width as the Online Players list): boss names; click a name to expand
+    ///      its recorded instance ids; click an id to open the stats panel.
+    ///   2. Stats panel (to the left): the selected instance's players, sorted by damage, with
+    ///      damage / % / armor / max columns; click a player to open the details panel.
+    ///   3. Details panel (further left): the selected player's attack types with hits / damage / %
+    ///      / avg / max.
+    /// Opening this overlay closes the Online Players overlay (see <see cref="SideOverlays"/>).
+    /// </summary>
+    internal class BossDamageNative : ISideOverlay
+    {
+        private float lastRefresh;
+        private const float UI_INTERVAL = 0.25f;
 
         private GameObject canvas;
         private GameObject buttonCanvas;
         private GameObject toggleButton;
-        private GameObject panel;
-        private GameObject listRoot;
+        private GameObject bossPanel, statsPanel, detailsPanel;
+        private GameObject bossList, statsList, detailsList;
 
         private bool uiBuilt;
         private bool visible;
@@ -44,44 +283,34 @@ namespace BornAgainM
         private TMP_FontAsset gameFont;
         private Material gameFontMat;
 
-        // ---- attack buffer access (same field the game uses for live attacks) ----
-        private static Il2CppSystem.Reflection.FieldInfo _attacksField;
-        private readonly HashSet<uint> processedAttacks = new();
-        private const int PROCESSED_CAP = 10000;   // clear the dedup set past this to bound memory
+        private string openName = "";        // expanded boss name (accordion)
+        private uint selectedInstance;       // selected boss instance -> stats panel
+        private string selectedBossName = "";
+        private string selectedPlayer = "";  // selected attacker -> details panel
 
-        /// <summary>Accumulated damage dealt to one boss, broken down per attacker.</summary>
-        private class BossDamage
-        {
-            public uint bossId;
-            public string name = "???";
-            public readonly Dictionary<uint, long> byAttacker = new();
-            public float lastSeen;
-            public long Total { get { long t = 0; foreach (var v in byAttacker.Values) t += v; return t; } }
-        }
+        private readonly List<GameObject> bossEls = new();
+        private readonly List<GameObject> statsEls = new();
+        private readonly List<GameObject> detailEls = new();
 
-        private readonly Dictionary<uint, BossDamage> bosses = new();   // keyed by boss EntityId
-        private readonly Dictionary<uint, string> attackerNames = new(); // EntityId -> display name
-        private uint selectedBoss;
-
-        private readonly List<GameObject> uiElements = new();
-
-        // ---- layout ----
-        private const float PANEL_W = 320f;
+        // ---- layout (boss list mirrors the Online Players list; the other panels stack leftward) ----
+        private const float BOSS_W = 210f;
+        private const float STATS_W = 340f;
+        private const float DETAILS_W = 340f;
         private const float HEADER_H = 26f;
-        private const float BTN_Y = 255f;   // just under the Online Players button (285)
+        private const float TOP_Y = 270f;           // same top as the Online Players list
+        private const float BTN_Y = 285f;           // same row as the Online Players button
+        private const float BTN_W = 110f;
 
-        /// <summary>Per-frame: build the UI once, capture boss damage every frame, and refresh the
-        /// panel on a throttle while visible.</summary>
         public void Update()
         {
             try
             {
                 if (!EnsureUI()) return;
                 TryLoadFont();
-                CaptureBossDamage();
-                if (visible && Time.time - lastScan >= UI_INTERVAL)
+                BossHitPatch.UpdateCache();
+                if (visible && Time.time - lastRefresh >= UI_INTERVAL)
                 {
-                    lastScan = Time.time;
+                    lastRefresh = Time.time;
                     RefreshUI();
                 }
             }
@@ -94,6 +323,7 @@ namespace BornAgainM
             if (World.Instance == null) return false;
             BuildCanvas();
             BuildButton();
+            SideOverlays.Register(this);
             uiBuilt = true;
             return canvas != null;
         }
@@ -111,118 +341,6 @@ namespace BornAgainM
         }
 
         // ------------------------------------------------------------------
-        /// <summary>Scan the live attack buffer and attribute each new attack's damage to any boss
-        /// it hit, under the attacking entity.</summary>
-        private void CaptureBossDamage()
-        {
-            var world = World.Instance;
-            if (world == null) return;
-            var sim = world.Simulation;
-            if (sim == null) return;
-
-            // Current bosses (id -> name), refreshed every frame.
-            var bossIds = new List<uint>();
-            try
-            {
-                var list = world.GetBosses();
-                if (list != null)
-                {
-                    int count = 0;
-                    try { count = list.Count(); } catch { count = 0; }
-                    for (int i = 0; i < count; i++)
-                    {
-                        Entity boss;
-                        try { boss = list.ElementAt(i); } catch { continue; }
-                        if (boss == null) continue;
-                        uint id; try { id = boss.EntityId; } catch { continue; }
-                        bossIds.Add(id);
-                        if (!bosses.TryGetValue(id, out var bd))
-                        {
-                            bd = new BossDamage { bossId = id };
-                            bosses[id] = bd;
-                        }
-                        try { var n = boss.EntityName; if (!string.IsNullOrEmpty(n)) bd.name = n; } catch { }
-                        bd.lastSeen = Time.time;
-                    }
-                }
-            }
-            catch { }
-            if (bossIds.Count == 0) return;
-
-            // Read the attack buffer.
-            try
-            {
-                if (_attacksField == null)
-                {
-                    var type = Il2CppSystem.Type.GetTypeFromHandle(Il2CppType.Of<Simulation>().TypeHandle);
-                    _attacksField = type.GetField("_attacks",
-                        (Il2CppSystem.Reflection.BindingFlags)((int)Il2CppSystem.Reflection.BindingFlags.NonPublic | (int)Il2CppSystem.Reflection.BindingFlags.Instance)
-                    );
-                }
-                if (_attacksField == null) return;
-
-                var fieldValue = _attacksField.GetValue(sim);
-                if (fieldValue == null) return;
-                var array = fieldValue.Cast<Il2CppSystem.Array>();
-                if (array == null) return;
-
-                if (processedAttacks.Count > PROCESSED_CAP) processedAttacks.Clear();
-
-                for (int i = 0; i < array.Length; i++)
-                {
-                    var atkObj = array.GetValue(i);
-                    if (atkObj == null) continue;
-                    var atk = atkObj.Cast<LiveAttack>();
-                    if (atk == null) continue;
-                    if (atk.Id == 0 || processedAttacks.Contains(atk.Id)) continue;
-                    if (atk.Damage <= 0) continue;
-
-                    var hits = atk.Hits;
-                    if (hits == null) continue;
-
-                    bool matchedBoss = false;
-                    foreach (var bossId in bossIds)
-                    {
-                        bool hit = false;
-                        try { hit = hits.Contains(bossId); } catch { }
-                        if (!hit) continue;
-                        matchedBoss = true;
-
-                        var bd = bosses[bossId];
-                        bd.byAttacker.TryGetValue(atk.OwnerId, out var cur);
-                        bd.byAttacker[atk.OwnerId] = cur + atk.Damage;
-                    }
-
-                    // Mark as processed only once its hits are resolved (so a boss hit registered a
-                    // frame later is not missed). An attack that hit no boss is still marked to avoid
-                    // rescanning it forever.
-                    if (matchedBoss || (atk.Hits != null && atk.Hits.Count > 0))
-                        processedAttacks.Add(atk.Id);
-                }
-            }
-            catch (Exception ex)
-            {
-                MelonLogger.Error($"[BossDamageNative] capture: {ex.Message}");
-            }
-        }
-
-        /// <summary>Resolve an attacking entity's display name, caching the result.</summary>
-        private string AttackerName(uint entityId)
-        {
-            if (attackerNames.TryGetValue(entityId, out var n) && !n.StartsWith("Entity_")) return n;
-            string name = null;
-            try
-            {
-                var ch = GameObject.FindObjectsOfType<Character>().FirstOrDefault(c => c.EntityId == entityId);
-                if (ch != null) { try { name = ch.EntityName; } catch { } }
-            }
-            catch { }
-            if (string.IsNullOrEmpty(name)) name = $"Entity_{entityId}";
-            attackerNames[entityId] = name;
-            return name;
-        }
-
-        // ------------------------------------------------------------------
         private void BuildCanvas()
         {
             canvas = new GameObject("BossDamageNativeCanvas");
@@ -234,48 +352,67 @@ namespace BornAgainM
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
             canvas.AddComponent<GraphicRaycaster>().blockingObjects = GraphicRaycaster.BlockingObjects.None;
 
-            // Centered panel so it does not overlap the boss monitor (top-left) or the online
-            // players list (right).
-            panel = new GameObject("Panel");
-            panel.transform.SetParent(canvas.transform, false);
-            var pr = panel.AddComponent<RectTransform>();
-            pr.anchorMin = pr.anchorMax = new Vector2(.5f, .5f);
-            pr.pivot = new Vector2(.5f, 1);
-            pr.anchoredPosition = new Vector2(0, 160);
-            pr.sizeDelta = new Vector2(PANEL_W, 200);
-            var bg = panel.AddComponent<Image>();
-            bg.color = new Color(.05f, .07f, .12f, .85f);
-            bg.raycastTarget = false;
-
-            AddHeader(panel, "BOSS DAMAGE");
-
-            listRoot = new GameObject("List");
-            listRoot.transform.SetParent(panel.transform, false);
-            var lr = listRoot.AddComponent<RectTransform>();
-            lr.anchorMin = new Vector2(0, 1);
-            lr.anchorMax = new Vector2(1, 1);
-            lr.pivot = new Vector2(.5f, 1);
-            lr.anchoredPosition = new Vector2(0, -HEADER_H);
-            lr.sizeDelta = new Vector2(0, 0);
+            bossPanel = MakePanel("BossPanel", new Vector2(-10, TOP_Y), BOSS_W, out bossList, "BOSS DAMAGE", withReset: true);
+            statsPanel = MakePanel("StatsPanel", new Vector2(-(10 + BOSS_W + 8), TOP_Y), STATS_W, out statsList, "PLAYERS", withReset: false);
+            detailsPanel = MakePanel("DetailsPanel", new Vector2(-(10 + BOSS_W + 8 + STATS_W + 8), TOP_Y), DETAILS_W, out detailsList, "ATTACKS", withReset: false);
+            statsPanel.SetActive(false);
+            detailsPanel.SetActive(false);
 
             canvas.SetActive(false);
         }
 
-        private void AddHeader(GameObject p, string title)
+        private GameObject MakePanel(string name, Vector2 pos, float width, out GameObject list, string title, bool withReset)
         {
+            var p = new GameObject(name);
+            p.transform.SetParent(canvas.transform, false);
+            var pr = p.AddComponent<RectTransform>();
+            pr.anchorMin = pr.anchorMax = new Vector2(1, .5f);
+            pr.pivot = new Vector2(1, 1);
+            pr.anchoredPosition = pos;
+            pr.sizeDelta = new Vector2(width, 200);
+            var bg = p.AddComponent<Image>();
+            bg.color = new Color(.05f, .07f, .12f, .85f);
+            bg.raycastTarget = false;
+
+            // Header.
             var hdr = new GameObject("Header");
             hdr.transform.SetParent(p.transform, false);
             var hr = hdr.AddComponent<RectTransform>();
-            hr.anchorMin = new Vector2(0, 1);
-            hr.anchorMax = new Vector2(1, 1);
-            hr.pivot = new Vector2(.5f, 1);
-            hr.sizeDelta = new Vector2(0, HEADER_H);
+            hr.anchorMin = new Vector2(0, 1); hr.anchorMax = new Vector2(1, 1);
+            hr.pivot = new Vector2(.5f, 1); hr.sizeDelta = new Vector2(0, HEADER_H);
             var himg = hdr.AddComponent<Image>();
-            himg.color = new Color(.09f, .14f, .24f, .95f);
-            himg.raycastTarget = false;
-            var tmp = MakeTmp(hdr.transform, Vector2.zero, Vector2.zero, 14,
-                              new Color(1f, .5f, .4f, 1f), TextAlignmentOptions.Center, bold: true, stretch: true);
-            tmp.text = title;
+            himg.color = new Color(.09f, .14f, .24f, .95f); himg.raycastTarget = false;
+            var htmp = MakeTmp(hdr.transform, Vector2.zero, Vector2.zero, 14,
+                               new Color(1f, .5f, .4f, 1f), TextAlignmentOptions.Center, bold: true, stretch: true);
+            htmp.text = title;
+
+            if (withReset)
+            {
+                var reset = new GameObject("Reset");
+                reset.transform.SetParent(hdr.transform, false);
+                var rr = reset.AddComponent<RectTransform>();
+                rr.anchorMin = rr.anchorMax = new Vector2(1, .5f);
+                rr.pivot = new Vector2(1, .5f);
+                rr.anchoredPosition = new Vector2(-4, 0);
+                rr.sizeDelta = new Vector2(44, 18);
+                var rimg = reset.AddComponent<Image>();
+                rimg.color = new Color(.5f, .22f, .18f, .95f);
+                var rbtn = reset.AddComponent<Button>();
+                rbtn.targetGraphic = rimg;
+                var rnav = rbtn.navigation; rnav.mode = Navigation.Mode.None; rbtn.navigation = rnav;
+                rbtn.onClick.AddListener((UnityAction)OnReset);
+                var rtmp = MakeTmp(reset.transform, Vector2.zero, Vector2.zero, 10,
+                                   Color.white, TextAlignmentOptions.Center, bold: true, stretch: true);
+                rtmp.text = "Reset"; rtmp.raycastTarget = false;
+            }
+
+            list = new GameObject("List");
+            list.transform.SetParent(p.transform, false);
+            var lr = list.AddComponent<RectTransform>();
+            lr.anchorMin = new Vector2(0, 1); lr.anchorMax = new Vector2(1, 1);
+            lr.pivot = new Vector2(.5f, 1); lr.anchoredPosition = new Vector2(0, -HEADER_H);
+            lr.sizeDelta = new Vector2(0, 0);
+            return p;
         }
 
         private void BuildButton()
@@ -293,19 +430,17 @@ namespace BornAgainM
             var r = toggleButton.AddComponent<RectTransform>();
             r.anchorMin = r.anchorMax = new Vector2(1, .5f);
             r.pivot = new Vector2(1, .5f);
-            r.anchoredPosition = new Vector2(-10, BTN_Y);
-            r.sizeDelta = new Vector2(110, 22);
+            r.anchoredPosition = new Vector2(-10, BTN_Y);   // right slot (Online Players takes the left slot)
+            r.sizeDelta = new Vector2(BTN_W, 22);
             var img = toggleButton.AddComponent<Image>();
             img.color = new Color(.45f, .3f, .25f, 1f);
             var btn = toggleButton.AddComponent<Button>();
             btn.targetGraphic = img;
             var nav = btn.navigation; nav.mode = Navigation.Mode.None; btn.navigation = nav;
             btn.onClick.AddListener((UnityAction)OnToggle);
-
             var tmp = MakeTmp(toggleButton.transform, Vector2.zero, Vector2.zero, 11,
                               Color.white, TextAlignmentOptions.Center, bold: true, stretch: true);
-            tmp.text = "Boss Damage";
-            tmp.raycastTarget = false;
+            tmp.text = "Boss Damage"; tmp.raycastTarget = false;
         }
 
         private void OnToggle()
@@ -313,83 +448,236 @@ namespace BornAgainM
             try { EventSystem.current?.SetSelectedGameObject(null); } catch { }
             visible = !visible;
             if (canvas) canvas.SetActive(visible);
+            if (!visible) { statsPanel.SetActive(false); detailsPanel.SetActive(false); }
             if (toggleButton)
                 toggleButton.GetComponent<Image>().color = visible
                     ? new Color(.8f, .5f, .3f, 1f) : new Color(.45f, .3f, .25f, 1f);
-            if (visible) RefreshUI();
+            if (visible) { SideOverlays.CloseExcept(this); RefreshUI(); }
+        }
+
+        public void HidePanel()
+        {
+            if (!visible) return;
+            visible = false;
+            if (canvas) canvas.SetActive(false);
+            if (toggleButton)
+                toggleButton.GetComponent<Image>().color = new Color(.45f, .3f, .25f, 1f);
+        }
+
+        private void OnReset()
+        {
+            try { EventSystem.current?.SetSelectedGameObject(null); } catch { }
+            BossHitPatch.Reset();
+            openName = ""; selectedInstance = 0; selectedBossName = ""; selectedPlayer = "";
+            statsPanel.SetActive(false); detailsPanel.SetActive(false);
+            RefreshUI();
         }
 
         // ------------------------------------------------------------------
-        /// <summary>Rebuild the panel: one clickable row per tracked boss (name + total), then the
-        /// per-attacker breakdown of the selected boss, sorted by damage.</summary>
         private void RefreshUI()
         {
-            if (panel == null) return;
+            RefreshBossList();
+            RefreshStats();
+            RefreshDetails();
+        }
 
-            foreach (var e in uiElements) { try { if (e) UnityEngine.Object.Destroy(e); } catch { } }
-            uiElements.Clear();
+        /// <summary>Boss list: names grouped from the instances, each expandable to its ids.</summary>
+        private void RefreshBossList()
+        {
+            foreach (var e in bossEls) { try { if (e) UnityEngine.Object.Destroy(e); } catch { } }
+            bossEls.Clear();
+
+            var groups = BossHitPatch.Bosses.Values
+                .GroupBy(b => b.name)
+                .Select(g => new { Name = g.Key, Instances = g.OrderBy(x => x.id).ToList(), Total = g.Sum(x => x.Total) })
+                .OrderByDescending(g => g.Total)
+                .ToList();
 
             float y = 0f;
-
-            // Boss list (most damaged first).
-            var ordered = bosses.Values.OrderByDescending(b => b.Total).ToList();
-            if (selectedBoss == 0 && ordered.Count > 0) selectedBoss = ordered[0].bossId;
-
-            foreach (var bd in ordered)
+            if (groups.Count == 0)
             {
-                bool sel = bd.bossId == selectedBoss;
-                var rowColor = sel ? new Color(.20f, .14f, .12f, .95f) : new Color(.10f, .10f, .14f, .8f);
-                var row = MakeRow(bd.name, $"{bd.Total}", new Color(1f, .7f, .5f, 1f), y, rowColor,
-                                  () => { selectedBoss = bd.bossId; RefreshUI(); });
-                uiElements.Add(row);
-                y -= 24f;
+                bossEls.Add(Label(bossList, "No boss damage yet", y, new Color(.7f, .7f, .7f, 1f), BOSS_W));
+                SizePanel(bossPanel, 30f);
+                return;
             }
 
-            if (ordered.Count == 0)
+            foreach (var g in groups)
             {
-                uiElements.Add(MakeLabel("No boss damage yet", y, new Color(.7f, .7f, .7f, 1f)));
-                y -= 24f;
-            }
+                bool open = g.Name == openName;
+                string gname = g.Name;
+                var header = Row(bossList, y, 25f, open ? new Color(.12f, .28f, .48f, .95f) : new Color(.08f, .12f, .20f, .9f),
+                                 () => { openName = (openName == gname) ? "" : gname; RefreshUI(); });
+                Col(header, 0f, .72f, TextAlignmentOptions.Left, 13, new Color(.85f, .95f, 1f, 1f),
+                    (open ? "▼ " : "▶ ") + Trim(g.Name, 16) + (g.Instances.Count > 1 ? $"  ({g.Instances.Count})" : ""));
+                Col(header, .72f, 1f, TextAlignmentOptions.Right, 13, new Color(.55f, .65f, .9f, 1f), BossHitPatch.Fmt(g.Total));
+                bossEls.Add(header);
+                y -= 25f;
 
-            // Breakdown of the selected boss.
-            if (bosses.TryGetValue(selectedBoss, out var selBd) && selBd.byAttacker.Count > 0)
-            {
-                y -= 6f;
-                uiElements.Add(MakeLabel($"— {selBd.name} —", y, new Color(.8f, .85f, 1f, 1f)));
-                y -= 22f;
+                if (!open) continue;
 
-                long total = selBd.Total;
-                foreach (var kv in selBd.byAttacker.OrderByDescending(k => k.Value))
+                foreach (var inst in g.Instances)
                 {
-                    string nm = AttackerName(kv.Key);
-                    float pct = total > 0 ? (kv.Value * 100f / total) : 0f;
-                    var r = MakeRow(nm, $"{kv.Value}  ({pct:F0}%)", Color.white, y,
-                                    new Color(.08f, .10f, .16f, .7f), null);
-                    uiElements.Add(r);
+                    bool sel = inst.id == selectedInstance;
+                    uint iid = inst.id; string iname = g.Name;
+                    var irow = Row(bossList, y, 22f, sel ? new Color(.20f, .45f, .70f, .98f) : new Color(.10f, .20f, .36f, .95f),
+                                   () => { OnInstanceClick(iname, iid); });
+                    Col(irow, 0f, .6f, TextAlignmentOptions.Left, 12, Color.white, $"   id:{inst.id}");
+                    Col(irow, .6f, 1f, TextAlignmentOptions.Right, 12, new Color(.55f, .68f, .85f, 1f), BossHitPatch.Fmt(inst.Total));
+                    bossEls.Add(irow);
                     y -= 22f;
                 }
             }
-
-            // Fit the panel height to the content.
-            float bodyH = -y + 8f;
-            panel.GetComponent<RectTransform>().sizeDelta = new Vector2(PANEL_W, HEADER_H + bodyH);
+            SizePanel(bossPanel, -y + 6f);
         }
 
-        /// <summary>Build a "label ........ value" row, optionally clickable.</summary>
-        private GameObject MakeRow(string label, string value, Color valueColor, float y, Color bgColor, Action onClick)
+        private void OnInstanceClick(string bossName, uint instanceId)
+        {
+            if (selectedInstance == instanceId && selectedBossName == bossName)
+            {
+                bool a = statsPanel.activeSelf;
+                statsPanel.SetActive(!a);
+                if (!a) { selectedPlayer = ""; detailsPanel.SetActive(false); }
+                return;
+            }
+            selectedBossName = bossName;
+            selectedInstance = instanceId;
+            selectedPlayer = "";
+            statsPanel.SetActive(true);
+            detailsPanel.SetActive(false);
+            RefreshUI();
+        }
+
+        /// <summary>Stats panel: players of the selected instance, sorted by damage.</summary>
+        private void RefreshStats()
+        {
+            if (!statsPanel.activeSelf) return;
+            foreach (var e in statsEls) { try { if (e) UnityEngine.Object.Destroy(e); } catch { } }
+            statsEls.Clear();
+
+            BossHitPatch.BossInstance inst = null;
+            BossHitPatch.Bosses.TryGetValue(selectedInstance, out inst);
+            if (inst == null || inst.name != selectedBossName) { statsPanel.SetActive(false); return; }
+
+            // Header text.
+            SetHeader(statsPanel, $"{Trim(inst.name, 20)}  id:{inst.id}");
+
+            float y = 0f;
+            // Column header.
+            var colh = Row(statsList, y, 16f, new Color(.06f, .10f, .18f, .95f), null);
+            Col(colh, 0f, .40f, TextAlignmentOptions.Left, 11, new Color(.6f, .75f, .95f, 1f), "NAME");
+            Col(colh, .40f, .62f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "DAMAGE");
+            Col(colh, .62f, .74f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "%");
+            Col(colh, .74f, 1f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "MAX");
+            statsEls.Add(colh);
+            y -= 18f;
+
+            long total = inst.Total;
+            var sorted = inst.byPlayer.OrderByDescending(x => x.Value.TotalDamage).ToList();
+            for (int i = 0; i < sorted.Count; i++)
+            {
+                string pname = sorted[i].Key;
+                var ps = sorted[i].Value;
+                bool sel = pname == selectedPlayer;
+                bool local = !string.IsNullOrEmpty(BossHitPatch.LocalPlayerName) && pname == BossHitPatch.LocalPlayerName;
+                var rowCol = sel ? new Color(.15f, .30f, .50f, .95f)
+                                 : (local ? new Color(.16f, .16f, .10f, .9f)
+                                          : (i % 2 == 0 ? new Color(.08f, .12f, .20f, .9f) : new Color(.06f, .09f, .16f, .9f)));
+                string cur = pname;
+                var row = Row(statsList, y, 20f, rowCol, () => OnPlayerClick(cur));
+                float pct = total > 0 ? (float)ps.TotalDamage / total * 100f : 0f;
+                Col(row, 0f, .40f, TextAlignmentOptions.Left, 13, Color.white, $"{i + 1}. {Trim(pname, 12)}");
+                Col(row, .40f, .62f, TextAlignmentOptions.Right, 13, new Color(.85f, .95f, 1f, 1f), BossHitPatch.Fmt(ps.TotalDamage));
+                Col(row, .62f, .74f, TextAlignmentOptions.Right, 12, new Color(.60f, .75f, .95f, 1f), $"{pct:F1}%");
+                Col(row, .74f, 1f, TextAlignmentOptions.Right, 12, new Color(.75f, .90f, 1f, 1f), BossHitPatch.Fmt(ps.MaxHit));
+                statsEls.Add(row);
+                y -= 20f;
+            }
+            SizePanel(statsPanel, -y + 6f);
+        }
+
+        private void OnPlayerClick(string playerName)
+        {
+            if (selectedPlayer == playerName)
+            {
+                bool a = detailsPanel.activeSelf;
+                detailsPanel.SetActive(!a);
+                return;
+            }
+            selectedPlayer = playerName;
+            detailsPanel.SetActive(true);
+            RefreshUI();
+        }
+
+        /// <summary>Details panel: the selected player's attack types for the selected instance.</summary>
+        private void RefreshDetails()
+        {
+            if (!detailsPanel.activeSelf) return;
+            foreach (var e in detailEls) { try { if (e) UnityEngine.Object.Destroy(e); } catch { } }
+            detailEls.Clear();
+
+            BossHitPatch.BossInstance inst = null;
+            BossHitPatch.Bosses.TryGetValue(selectedInstance, out inst);
+            if (inst == null || !inst.byPlayer.TryGetValue(selectedPlayer, out var ps))
+            { detailsPanel.SetActive(false); return; }
+
+            SetHeader(detailsPanel, $"{Trim(selectedPlayer, 20)} — ATTACKS");
+
+            float y = 0f;
+            var colh = Row(detailsList, y, 16f, new Color(.06f, .10f, .18f, .95f), null);
+            Col(colh, 0f, .40f, TextAlignmentOptions.Left, 11, new Color(.6f, .75f, .95f, 1f), "ATTACK");
+            Col(colh, .40f, .52f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "HITS");
+            Col(colh, .52f, .70f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "DAMAGE");
+            Col(colh, .70f, .82f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "AVG");
+            Col(colh, .82f, 1f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "MAX");
+            detailEls.Add(colh);
+            y -= 18f;
+
+            long totalDmg = ps.TotalDamage;
+            var sorted = ps.AttacksByType.OrderByDescending(x => x.Value.TotalDamage).ToList();
+            for (int i = 0; i < sorted.Count; i++)
+            {
+                var ai = sorted[i].Value;
+                var row = Row(detailsList, y, 20f, i % 2 == 0 ? new Color(.08f, .12f, .20f, .92f) : new Color(.06f, .09f, .16f, .92f), null);
+                int avg = ai.Count > 0 ? ai.TotalDamage / ai.Count : 0;
+                Col(row, 0f, .40f, TextAlignmentOptions.Left, 12, new Color(.80f, .88f, 1f, 1f), Trim(sorted[i].Key, 18));
+                Col(row, .40f, .52f, TextAlignmentOptions.Right, 12, new Color(.75f, .85f, 1f, 1f), ai.Count.ToString());
+                Col(row, .52f, .70f, TextAlignmentOptions.Right, 12, new Color(.85f, .95f, 1f, 1f), BossHitPatch.Fmt(ai.TotalDamage));
+                Col(row, .70f, .82f, TextAlignmentOptions.Right, 12, new Color(.70f, .82f, 1f, 1f), BossHitPatch.Fmt(avg));
+                Col(row, .82f, 1f, TextAlignmentOptions.Right, 12, new Color(.75f, .90f, 1f, 1f), BossHitPatch.Fmt(ai.MaxDamage));
+                detailEls.Add(row);
+                y -= 20f;
+            }
+            SizePanel(detailsPanel, -y + 6f);
+        }
+
+        // ------------------------------------------------------------------
+        private static string Trim(string s, int max)
+            => string.IsNullOrEmpty(s) ? "" : (s.Length > max ? s.Substring(0, max - 1) + "." : s);
+
+        private void SetHeader(GameObject panel, string text)
+        {
+            var tmp = panel.transform.Find("Header/Txt")?.GetComponent<TextMeshProUGUI>();
+            if (tmp != null) tmp.text = text;
+        }
+
+        private void SizePanel(GameObject panel, float bodyH)
+        {
+            if (bodyH < 20f) bodyH = 20f;
+            panel.GetComponent<RectTransform>().sizeDelta = new Vector2(panel.GetComponent<RectTransform>().sizeDelta.x, HEADER_H + bodyH);
+        }
+
+        /// <summary>Create a row (background + optional button) parented to a panel's list.</summary>
+        private GameObject Row(GameObject list, float y, float h, Color bg, Action onClick)
         {
             var go = new GameObject("Row");
-            go.transform.SetParent(listRoot.transform, false);
+            go.transform.SetParent(list.transform, false);
             var rt = go.AddComponent<RectTransform>();
-            rt.anchorMin = new Vector2(0, 1);
-            rt.anchorMax = new Vector2(1, 1);
+            rt.anchorMin = new Vector2(0, 1); rt.anchorMax = new Vector2(1, 1);
             rt.pivot = new Vector2(.5f, 1);
             rt.anchoredPosition = new Vector2(0, y);
-            rt.sizeDelta = new Vector2(-10, 22);
-
+            rt.sizeDelta = new Vector2(-8, h);
             var img = go.AddComponent<Image>();
-            img.color = bgColor;
-            img.raycastTarget = onClick != null;
+            img.color = bg; img.raycastTarget = onClick != null;
             if (onClick != null)
             {
                 var btn = go.AddComponent<Button>();
@@ -397,43 +685,38 @@ namespace BornAgainM
                 var nav = btn.navigation; nav.mode = Navigation.Mode.None; btn.navigation = nav;
                 btn.onClick.AddListener((UnityAction)(() => onClick()));
             }
-
-            var lbl = MakeTmp(go.transform, new Vector2(8, 0), new Vector2(190, 22), 13,
-                              new Color(.85f, .9f, 1f, 1f), TextAlignmentOptions.Left, bold: true);
-            lbl.rectTransform.anchorMin = new Vector2(0, .5f);
-            lbl.rectTransform.anchorMax = new Vector2(0, .5f);
-            lbl.rectTransform.pivot = new Vector2(0, .5f);
-            lbl.text = label;
-            lbl.raycastTarget = false;
-
-            var val = MakeTmp(go.transform, new Vector2(-8, 0), new Vector2(120, 22), 13,
-                              valueColor, TextAlignmentOptions.Right, bold: true);
-            val.rectTransform.anchorMin = new Vector2(1, .5f);
-            val.rectTransform.anchorMax = new Vector2(1, .5f);
-            val.rectTransform.pivot = new Vector2(1, .5f);
-            val.text = value;
-            val.raycastTarget = false;
-
             return go;
         }
 
-        private GameObject MakeLabel(string text, float y, Color color)
+        /// <summary>Add a fractional-width text column to a row.</summary>
+        private TextMeshProUGUI Col(GameObject row, float x0, float x1, TextAlignmentOptions align, float size, Color color, string text)
+        {
+            var go = new GameObject("c");
+            go.transform.SetParent(row.transform, false);
+            var rt = go.AddComponent<RectTransform>();
+            rt.anchorMin = new Vector2(x0, 0f); rt.anchorMax = new Vector2(x1, 1f);
+            rt.offsetMin = new Vector2(4, 0); rt.offsetMax = new Vector2(-4, 0);
+            var t = go.AddComponent<TextMeshProUGUI>();
+            ApplyFont(t);
+            t.fontSize = size; t.color = color; t.alignment = align; t.text = text;
+            t.raycastTarget = false; t.enableWordWrapping = false; t.overflowMode = TextOverflowModes.Ellipsis;
+            return t;
+        }
+
+        private GameObject Label(GameObject list, string text, float y, Color color, float width)
         {
             var go = new GameObject("Label");
-            go.transform.SetParent(listRoot.transform, false);
+            go.transform.SetParent(list.transform, false);
             var rt = go.AddComponent<RectTransform>();
-            rt.anchorMin = new Vector2(0, 1);
-            rt.anchorMax = new Vector2(1, 1);
-            rt.pivot = new Vector2(.5f, 1);
-            rt.anchoredPosition = new Vector2(0, y);
+            rt.anchorMin = new Vector2(0, 1); rt.anchorMax = new Vector2(1, 1);
+            rt.pivot = new Vector2(.5f, 1); rt.anchoredPosition = new Vector2(0, y);
             rt.sizeDelta = new Vector2(-10, 20);
-            var tmp = MakeTmp(go.transform, new Vector2(8, 0), new Vector2(PANEL_W - 16, 20), 12,
+            var tmp = MakeTmp(go.transform, new Vector2(8, 0), new Vector2(width - 16, 20), 12,
                               color, TextAlignmentOptions.Left, bold: true);
             tmp.rectTransform.anchorMin = new Vector2(0, .5f);
             tmp.rectTransform.anchorMax = new Vector2(0, .5f);
             tmp.rectTransform.pivot = new Vector2(0, .5f);
-            tmp.text = text;
-            tmp.raycastTarget = false;
+            tmp.text = text; tmp.raycastTarget = false;
             return go;
         }
 

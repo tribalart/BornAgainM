@@ -31,7 +31,7 @@ namespace BornAgainM
     ///
     /// This class is self-contained and owns its own toggle button on the right edge of the screen.
     /// </summary>
-    internal class OnlinePlayersNative
+    internal class OnlinePlayersNative : ISideOverlay
     {
         private float lastScan;
         private const float SCAN_INTERVAL = 0.5f;
@@ -139,6 +139,7 @@ namespace BornAgainM
             if (World.Instance == null) return false;
             BuildCanvas();
             BuildButton();
+            SideOverlays.Register(this);
             uiBuilt = true;
             return canvas != null;
         }
@@ -368,7 +369,7 @@ namespace BornAgainM
             var r = toggleButton.AddComponent<RectTransform>();
             r.anchorMin = r.anchorMax = new Vector2(1, .5f);
             r.pivot = new Vector2(1, .5f);
-            r.anchoredPosition = new Vector2(-10, BTN_Y);
+            r.anchoredPosition = new Vector2(-(10 + 110 + 4), BTN_Y);  // left slot (Boss Damage takes the right slot)
             r.sizeDelta = new Vector2(110, 22);
             var img = toggleButton.AddComponent<Image>();
             img.color = new Color(.25f, .45f, .25f, 1f);
@@ -397,7 +398,19 @@ namespace BornAgainM
             if (toggleButton)
                 toggleButton.GetComponent<Image>().color = visible
                     ? new Color(.2f, .8f, .3f, 1f) : new Color(.25f, .45f, .25f, 1f);
-            if (visible) RefreshList();
+            if (visible) { SideOverlays.CloseExcept(this); RefreshList(); }
+        }
+
+        /// <summary>Force the overlay closed (called when another right-edge overlay opens).</summary>
+        public void HidePanel()
+        {
+            if (!visible) return;
+            visible = false;
+            if (canvas) canvas.SetActive(false);
+            selectedPlayerId = 0;
+            if (statsPanel) statsPanel.SetActive(false);
+            if (toggleButton)
+                toggleButton.GetComponent<Image>().color = new Color(.25f, .45f, .25f, 1f);
         }
 
         // ------------------------------------------------------------------
