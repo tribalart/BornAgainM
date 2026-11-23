@@ -29,6 +29,7 @@ namespace BornAgainM
         {
             MelonLogger.Msg("BornAgainM Mod Loaded");
             MelonLogger.Msg("DPS Meter (toggle with NumKey+)");
+            MelonLogger.Msg("Map Editor: F3 = open, F4 = back to game");
 
             onlinePlayers = new OnlinePlayersNative();
             bossMonitor = new BossMonitorNative();
@@ -57,13 +58,34 @@ namespace BornAgainM
             }
         }
 
-        /// <summary>Per-frame: tick the overlays and the damage meters.</summary>
+        /// <summary>Per-frame: handle the editor hotkeys, then tick the overlays and damage meters.</summary>
         public override void OnUpdate()
         {
+            HandleMapEditorHotkeys();
+
             bossMonitor?.Update();
             onlinePlayers?.Update();
             bossDamage?.Update();
             dpsMeter?.Update();
+        }
+
+        /// <summary>
+        /// The game ships a full in-client tile-map editor in its own scene, reachable via the static
+        /// <c>SceneNav</c> navigation. These hotkeys open it (F6) and return to gameplay (F7) without
+        /// needing a menu entry.
+        /// </summary>
+        private static void HandleMapEditorHotkeys()
+        {
+            if (Input.GetKeyDown(KeyCode.F3))
+            {
+                try { SceneNav.GotoMapEditor(); }
+                catch (Exception ex) { MelonLogger.Warning($"[MapEditor] GotoMapEditor failed: {ex.Message}"); }
+            }
+            else if (Input.GetKeyDown(KeyCode.F4))
+            {
+                try { SceneNav.GotoGame(); }
+                catch (Exception ex) { MelonLogger.Warning($"[MapEditor] GotoGame failed: {ex.Message}"); }
+            }
         }
 
         public override void OnGUI()
