@@ -1022,6 +1022,13 @@ namespace BornAgainM
                     {
                         try { slot.ShowPlaceholder = false; } catch { }
                         try { slot.Swappable = false; } catch { }
+                        // This clone inherits the source slot's live identity (Index, EntityId,
+                        // SlotController) from Instantiate, so its native click/drag handlers would
+                        // act on the LOCAL player's real inventory slot. Disabling the Slot behaviour
+                        // stops the EventSystem from delivering OnPointerClick/OnBeginDrag/OnDrag to
+                        // it (Unity skips disabled handlers), making the clone purely visual. The
+                        // tooltip is driven by a separate TooltipActivator component, so it survives.
+                        try { slot.enabled = false; } catch { }
                         StretchFill(slot.Background);
                         StretchFill(slot.ItemImage);
                         try { if (slot.ItemImage != null) slot.ItemImage.preserveAspect = true; } catch { }
