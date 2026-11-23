@@ -84,9 +84,6 @@
 		<Reference Include="Il2CppSystem.Web">
 			<HintPath>C:\Program Files (x86)\Steam\steamapps\common\Born Again\MelonLoader\Il2CppAssemblies\Il2CppSystem.Web.dll</HintPath>
 		</Reference>
-		<Reference Include="Il2CppSystem.Windows.Forms">
-			<HintPath>C:\Program Files (x86)\Steam\steamapps\common\Born Again\MelonLoader\Il2CppAssemblies\Il2CppSystem.Windows.Forms.dll</HintPath>
-		</Reference>
 		<Reference Include="Il2CppSystem.Xml">
 			<HintPath>C:\Program Files (x86)\Steam\steamapps\common\Born Again\MelonLoader\Il2CppAssemblies\Il2CppSystem.Xml.dll</HintPath>
 		</Reference>
@@ -406,18 +403,22 @@
 			<HintPath>C:\Program Files (x86)\Steam\steamapps\common\Born Again\MelonLoader\net6\Il2CppInterop.Common.dll</HintPath>
 		</Reference>
 
+
 	</ItemGroup>
 
 	<PropertyGroup>
 		<AllowUnsafeBlocks>True</AllowUnsafeBlocks>
 		<EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+		<PlatformTarget>x64</PlatformTarget>
 	</PropertyGroup>
 
 	<ItemGroup>
 		<Compile Include="BankManager.cs" />
-		<Compile Include="PlayersStats.cs" />
-		<Compile Include="PlayersList.cs" />
-		<Compile Include="Core1.cs" />
+		<Compile Include="BossGuiNative.cs" />
+		<Compile Include="OnlinePlayersNative.cs" />
+		<Compile Include="BossDamageNative.cs" />
+		<Compile Include="DpsMeter.cs" />
+		<Compile Include="Core.cs" />
 	</ItemGroup>
 	
 	<Target Name="PostBuild" AfterTargets="PostBuildEvent">
