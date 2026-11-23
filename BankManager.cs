@@ -245,10 +245,11 @@ namespace BornAgainM
     }
 
     /// <summary>
-    /// Sorts the bank by item type. Reads every slot once (snapshot), computes the whole swap
-    /// plan in memory, then replays it on the server one swap at a time — each confirmed by
-    /// re-reading the slot, and paced so requests never go out faster than ~300 ms. A second call
-    /// while a sort is running requests a clean stop.
+    /// Sorts the bank by item type with repeated passes until a pass changes nothing. Each pass
+    /// reads the live slots from the bank's own <see cref="BankMenu.AllSlots"/> reference (no scene
+    /// scan) and, for each position, brings in the type it should hold. Every swap is confirmed by
+    /// re-reading the slot and paced to ~300 ms; re-reading the real state each pass lets the sort
+    /// self-heal if a swap does not land. A second call requests a clean stop.
     /// </summary>
     internal class SortBank
     {
@@ -273,9 +274,11 @@ namespace BornAgainM
         }
 
         /// <summary>
-        /// Reads the slots once, builds the full swap plan in memory (for each position, bring in
-        /// the type it should hold, pulling it from a later slot), then replays the plan on the
-        /// server, confirming and pacing each swap.
+        /// Passes over the bank until a pass changes nothing. Each pass refreshes the slots from
+        /// <see cref="BankMenu.AllSlots"/> (a direct reference, not a scene scan) and, for each
+        /// position, brings in the type it should hold, confirming every swap by re-reading the
+        /// slot. Re-reading the real state each pass lets it self-heal if a swap does not land;
+        /// a pass cap and a "nothing moved" exit guarantee it terminates.
         /// </summary>
         private System.Collections.IEnumerator SortCoroutine()
         {
@@ -286,55 +289,76 @@ namespace BornAgainM
                 running = false;
                 yield break;
             }
-
-            // 1) Snapshot: the only read of the live slots.
-            var slots = UnityEngine.Object.FindObjectsOfType<Slot>()
-                .OrderBy(s => s.Index)
-                .ToArray();
-            int n = slots.Length;
-            var current = new int[n];
-            for (int k = 0; k < n; k++)
+            var bankMenu = controller.BankMenu;
+            if (bankMenu == null)
             {
-                var value = slots[k].GetItemValue();
-                current[k] = value.Count > 0 ? (int)value.Type : Empty;
+                MelonLogger.Msg("Bank not available");
+                running = false;
+                yield break;
             }
 
-            // 2) Plan (pure CPU): target = non-empty types sorted ascending; for each position,
-            //    bring the wanted type in from a later slot and record the swap.
-            var want = current.Where(t => t != Empty).OrderBy(t => t).ToArray();
-            var plan = new List<(int a, int b, int type)>();
-            for (int i = 0; i < want.Length; i++)
-            {
-                if (current[i] == want[i]) continue;
-                int target = want[i];
-                int j = Array.FindIndex(current, i + 1, t => t == target);
-                if (j < 0) continue;
-                (current[i], current[j]) = (current[j], current[i]);
-                plan.Add((i, j, target));
-            }
-
-            MelonLogger.Msg($"Bank sort: {plan.Count} swaps planned");
-
-            // 3) Execute: replay the plan on the server, confirming and pacing each swap.
             try
             {
-                foreach (var (a, b, type) in plan)
+                for (int pass = 0; !stopRequested && pass < 100; pass++)
                 {
-                    if (stopRequested) break;
-                    controller.Swap(slots[a], slots[b]);
-
-                    // Confirm slot a actually holds its final type, with a ~300 ms pacing floor
-                    // and a 2 s timeout in case the server never applies the swap.
-                    float waited = 0f;
-                    float floor = UnityEngine.Random.Range(0.30f, 0.35f);
-                    while (waited < 2f)
+                    // Refresh from the bank's own rows (cheap: no FindObjectsOfType scene scan).
+                    var rows = bankMenu._bankRows;
+                    if (rows == null) break;
+                    var live = new List<Slot>();
+                    for (int r = 0; r < rows.Count; r++)
                     {
-                        yield return new WaitForSeconds(0.05f);
-                        waited += 0.05f;
-                        if (waited < floor) continue;   // pacing floor not reached: can't finish, skip the read
-                        var value = slots[a].GetItemValue();
-                        if (value.Count > 0 && (int)value.Type == type) break;
+                        var row = rows[r];
+                        if (row == null) continue;
+                        foreach (var s in row.Slots) live.Add(s);
                     }
+                    var slots = live.OrderBy(s => s.Index).ToArray();
+                    int n = slots.Length;
+                    if (n == 0) break;
+
+                    var current = new int[n];
+                    for (int k = 0; k < n; k++)
+                    {
+                        var value = slots[k].GetItemValue();
+                        current[k] = value.Count > 0 ? (int)value.Type : Empty;
+                    }
+                    var want = current.Where(t => t != Empty).OrderBy(t => t).ToArray();
+
+                    bool swapped = false;
+                    for (int i = 0; i < want.Length; i++)
+                    {
+                        if (stopRequested) break;
+                        if (current[i] == want[i]) continue;
+                        int target = want[i];
+                        int j = Array.FindIndex(current, i + 1, t => t == target);
+                        if (j < 0) continue;
+
+                        controller.Swap(slots[i], slots[j]);
+
+                        // Confirm the swap landed, with a ~300 ms pacing floor and a 2 s timeout.
+                        bool confirmed = false;
+                        float waited = 0f;
+                        float floor = UnityEngine.Random.Range(0.30f, 0.35f);
+                        while (waited < 2f)
+                        {
+                            yield return new WaitForSeconds(0.05f);
+                            waited += 0.05f;
+                            if (waited < floor) continue;
+                            var value = slots[i].GetItemValue();
+                            if (value.Count > 0 && (int)value.Type == target) { confirmed = true; break; }
+                        }
+
+                        if (confirmed)
+                        {
+                            (current[i], current[j]) = (current[j], current[i]);
+                            swapped = true;
+                        }
+                        else
+                        {
+                            MelonLogger.Warning($"Swap not confirmed (slot {i}); retrying next pass");
+                        }
+                    }
+
+                    if (!swapped) break;   // nothing moved: sorted, or nothing more we can do
                 }
             }
             finally
