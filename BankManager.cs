@@ -6,15 +6,19 @@ using UnityEngine.UI;
 using Text = UnityEngine.UI.Text;
 using Image = UnityEngine.UI.Image;
 using System.Collections.Generic;
-using System.Linq; // AJOUTÉ - nécessaire pour LINQ
+using System.Linq;
 using HarmonyLib;
 
 namespace BornAgainM
 {
+    /// <summary>
+    /// Adds a "SORT" button to the game's native bank window. A Harmony patch on
+    /// <see cref="BankMenu.Setup"/> fires whenever the bank opens; the button, when clicked,
+    /// drives <see cref="SortBank"/> to group the bank's stacks by item type.
+    /// </summary>
     internal class BankManager
     {
-       
-
+        /// <summary>Runs after the native bank window is set up, each time it opens.</summary>
         [HarmonyPatch(typeof(BankMenu))]
         [HarmonyPatch(nameof(BankMenu.Setup))]
         public class BankMenuPatch
@@ -29,7 +33,9 @@ namespace BornAgainM
         }
 
         private UIManager uiManager;
-        private static SortBank sortBank = new SortBank(); // Instance statique
+
+        // Static so the sort state persists across bank open/close cycles.
+        private static SortBank sortBank = new SortBank();
 
         public BankManager()
         {
@@ -45,22 +51,27 @@ namespace BornAgainM
                 MelonLogger.Msg("BankMenu is null");
                 return;
             }
-        
-           bool isOpen = bankMenu.gameObject.activeInHierarchy;
+
+            bool isOpen = bankMenu.gameObject.activeInHierarchy;
             MelonLogger.Msg(isOpen
                 ? "Bank is OPEN"
                 : "Bank is CLOSED");
 
-            // Passer l'instance de sortBank au bouton
             AddBankSortButton.TryAddButton(bankMenu, sortBank);
         }
     }
 
+    /// <summary>
+    /// Builds the SORT button inside the bank window. It clones an existing native button so the
+    /// game's own styling/components are inherited; if the window has no button to clone, it falls
+    /// back to building one from scratch.
+    /// </summary>
     internal class AddBankSortButton
     {
         private static GameObject sortButton;
         private static SortBank sortBankReference;
 
+        /// <summary>Creates the SORT button once per bank window and wires it to <paramref name="sortBank"/>.</summary>
         public static void TryAddButton(BankMenu bankMenu, SortBank sortBank)
         {
             if (bankMenu == null)
@@ -75,17 +86,14 @@ namespace BornAgainM
                 return;
             }
 
-            // Stocker la référence
             sortBankReference = sortBank;
 
             MelonLogger.Msg("=== Starting button creation ===");
 
-            // Explorer la hiérarchie
             MelonLogger.Msg($"BankMenu GameObject: {bankMenu.gameObject.name}");
             MelonLogger.Msg($"BankMenu active: {bankMenu.gameObject.activeSelf}");
             MelonLogger.Msg($"BankMenu activeInHierarchy: {bankMenu.gameObject.activeInHierarchy}");
 
-            // Chercher tous les boutons
             var allButtons = bankMenu.GetComponentsInChildren<Button>(true);
             MelonLogger.Msg($"Found {allButtons.Length} buttons in BankMenu (including inactive)");
 
@@ -101,11 +109,10 @@ namespace BornAgainM
                 return;
             }
 
-            // Utiliser le premier bouton trouvé comme template
+            // Clone the first native button as a template so it inherits the game's look.
             var existingButton = allButtons[0];
             MelonLogger.Msg($"Using button template: {existingButton.gameObject.name}");
 
-            // Clone du bouton
             sortButton = UnityEngine.Object.Instantiate(
                 existingButton.gameObject,
                 bankMenu.transform
@@ -114,11 +121,9 @@ namespace BornAgainM
 
             MelonLogger.Msg($"Button cloned: {sortButton.name}");
 
-            // Activer le bouton
             sortButton.SetActive(true);
             MelonLogger.Msg($"Button activated: {sortButton.activeSelf}");
 
-            // Positionner le bouton
             var rectTransform = sortButton.GetComponent<RectTransform>();
             if (rectTransform != null)
             {
@@ -136,7 +141,7 @@ namespace BornAgainM
                 MelonLogger.Msg("WARNING: No RectTransform on button!");
             }
 
-            // Changement du texte
+            // The native button may use legacy UI Text or TextMeshPro; handle both.
             var text = sortButton.GetComponentInChildren<Text>();
             if (text != null)
             {
@@ -157,7 +162,6 @@ namespace BornAgainM
                 }
             }
 
-            // Ajout du listener
             var button = sortButton.GetComponent<Button>();
             if (button != null)
             {
@@ -173,6 +177,7 @@ namespace BornAgainM
             MelonLogger.Msg("=== Button creation complete ===");
         }
 
+        /// <summary>Fallback button build when the bank window exposes no button to clone.</summary>
         private static void CreateButtonFromScratch(BankMenu bankMenu)
         {
             MelonLogger.Msg("Creating button from scratch...");
@@ -211,11 +216,11 @@ namespace BornAgainM
             MelonLogger.Msg("Button created from scratch!");
         }
 
+        /// <summary>Click handler: toggles the bank sort on/off.</summary>
         private static void OnSortClicked()
         {
             MelonLogger.Msg("SORT BANK CLICKED");
 
-            // Appeler la méthode de tri
             if (sortBankReference != null)
             {
                 sortBankReference.ToggleSort();
@@ -226,6 +231,7 @@ namespace BornAgainM
             }
         }
 
+        /// <summary>Destroys the button and clears references so it can be rebuilt next time the bank opens.</summary>
         public static void Reset()
         {
             if (sortButton != null)
@@ -238,11 +244,18 @@ namespace BornAgainM
         }
     }
 
+    /// <summary>
+    /// Sorts the bank by grouping stacks of the same item type and compacting them toward the
+    /// lowest slot indices, one swap at a time. Swaps go through the native
+    /// <see cref="SlotController.Swap"/>, with short randomized delays between them. A second call
+    /// while a sort is running requests a clean stop.
+    /// </summary>
     internal class SortBank
     {
         private bool sortingInProgress = false;
         private bool stopRequested = false;
 
+        /// <summary>Starts a sort, or requests a stop if one is already running.</summary>
         public void ToggleSort()
         {
             if (sortingInProgress)
@@ -259,6 +272,11 @@ namespace BornAgainM
             }
         }
 
+        /// <summary>
+        /// Walks the slots from index 0 up: for each distinct item type (ascending), moves its
+        /// stacks to the current target index via swaps, then advances. Re-queries the live slots
+        /// each pass because a swap mutates their contents.
+        /// </summary>
         private System.Collections.IEnumerator SortBankCoroutine()
         {
             const int startIndex = 0;
@@ -279,7 +297,7 @@ namespace BornAgainM
                     controller = UnityEngine.Object.FindObjectOfType<Il2Cpp.SlotController>();
                     if (controller == null)
                     {
-                        MelonLogger.Msg("SlotController disparu, arrêt du tri");
+                        MelonLogger.Msg("SlotController gone, stopping sort");
                         break;
                     }
 
