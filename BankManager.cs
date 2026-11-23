@@ -337,11 +337,11 @@ namespace BornAgainM
                         // Confirm the swap landed, with a ~300 ms pacing floor and a 2 s timeout.
                         bool confirmed = false;
                         float waited = 0f;
-                        float floor = UnityEngine.Random.Range(0.30f, 0.35f);
+                        float floor = UnityEngine.Random.Range(0.222f, 0.259f);  // ~0.30-0.35 / 1.35
                         while (waited < 2f)
                         {
-                            yield return new WaitForSeconds(0.05f);
-                            waited += 0.05f;
+                            yield return new WaitForSeconds(0.025f);
+                            waited += 0.025f;
                             if (waited < floor) continue;
                             var value = slots[i].GetItemValue();
                             if (value.Count > 0 && (int)value.Type == target) { confirmed = true; break; }
