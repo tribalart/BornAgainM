@@ -5,3 +5,6 @@ I did not modify any game data; I am only reading different values to display on
 and to swap item slots for bank sorting.
 
 I do not intend to break the game, affect players’ journeys, or gain any unfair advantage. I am simply using BornAgain as a theme because I am enjoying the game at the moment. Thank you.
+
+
+**From what I understand now,its seem the client handles the DamageOverTime as a world message without an ownerId, which makes it impossible on the client side to log DoTs correctly.**
