@@ -48,10 +48,8 @@ Targets `net6.0`. The project references the game's Il2Cpp assemblies from a loc
    `Il2CppAssemblyGenerator` populates `MelonLoader\Il2CppAssemblies\`. Before that the folder does not
    exist and nothing resolves.
 2. In `BornAgainM.csproj`, set the single `<GameDir>` property to your own Born Again install path. Every
-   reference (and the post-build copy to `Mods`) derives from it, and the whole `Il2CppAssemblies` folder is
-   pulled in with a `*.dll` wildcard — so there is no per-DLL list to maintain.
-3. `dotnet build -c Release`. The post-build step copies the DLL into `<GameDir>\Mods` (this only succeeds
-   while the game is closed; the DLL is locked while it runs).
+   reference (and the post-build copy to `Mods`) derives from it.
+3. `dotnet build -c Release`. The post-build step copies the DLL into `<GameDir>\Mods`.
 
 MelonLoader itself has no built-in csproj generator, but the third-party
 [MelonLoader Wizard](https://marketplace.visualstudio.com/items?itemName=masterhell.melonloader-vscode-wizard)
