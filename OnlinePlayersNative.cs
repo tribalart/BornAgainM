@@ -859,8 +859,19 @@ namespace BornAgainM
         // ------------------------------------------------------------------
         //  Stats + equipment panel (native slots)
         // ------------------------------------------------------------------
-        private readonly List<GameObject> statElements = new();
         private readonly List<GameObject> equipSlots = new();
+
+        // Pooled detail-panel widgets. The panel is rebuilt only on click, but the widgets are kept
+        // alive and reused (text/sprite/position updated) instead of destroyed and recreated.
+        private class LineWidget { public GameObject go; public RectTransform rt; public TextMeshProUGUI label; public TextMeshProUGUI value; }
+        private class StatWidget { public GameObject go; public RectTransform rt; public Image icon; public TextMeshProUGUI name; public TextMeshProUGUI baseVal; public TextMeshProUGUI value; }
+        private class IconRowWidget { public GameObject go; public RectTransform rt; public readonly List<Image> icons = new(); }
+
+        private readonly List<LineWidget> linePool = new();
+        private int lineUsed;
+        private readonly List<StatWidget> statRowPool = new();
+        private int statRowUsed;
+        private IconRowWidget blessingRow;
 
         /// <summary>Capture a player's full detail at click time: equipment, blessings and thread by
         /// pointer, primary stats via GetStat. Marked valid only when the state was readable and at
@@ -908,8 +919,8 @@ namespace BornAgainM
         {
             if (statsPanel == null || snap == null) return;
 
-            foreach (var e in statElements) { try { if (e) UnityEngine.Object.Destroy(e); } catch { } }
-            statElements.Clear();
+            lineUsed = 0;
+            statRowUsed = 0;
 
             string thread = snap.thread ?? "";
             Color thCol = snap.threadColor;
@@ -927,15 +938,19 @@ namespace BornAgainM
 
             if (!string.IsNullOrEmpty(thread))
             {
-                statElements.Add(MakeLine("Thread", thread, thCol, y));
+                AcquireLine("Thread", thread, thCol, y);
                 y -= 22f;
             }
 
             var blessings = snap.blessings ?? new List<ushort>();
             if (blessings.Count > 0)
             {
-                statElements.Add(MakeIconRow(blessings, y));
+                AcquireIconRow(blessings, y);
                 y -= 30f;
+            }
+            else if (blessingRow != null)
+            {
+                blessingRow.go.SetActive(false);
             }
 
             // Primary stats with native icon (base / functional).
@@ -943,15 +958,13 @@ namespace BornAgainM
             {
                 int bse = snap.statBase[i], fct = snap.statFunc[i];
                 if (bse == 0 && fct == 0) continue;
-                var el = MakeStatRow(StatOrder[i], bse, fct, y);
-                statElements.Add(el);
+                AcquireStat(StatOrder[i], bse, fct, y);
                 y -= 24f;
             }
 
             // Equipment: real native slots (from EntityState.Equips, read by pointer).
             y -= 10f;
-            var eqLabel = MakeLine("Equipment", "", new Color(.7f, .82f, 1f, 1f), y);
-            statElements.Add(eqLabel);
+            AcquireLine("Equipment", "", new Color(.7f, .82f, 1f, 1f), y);
             y -= 32f;   // gap between the label and the item row
 
             EnsureEquipSlots(5);
@@ -991,6 +1004,10 @@ namespace BornAgainM
                 }
                 catch { }
             }
+
+            // Hide pooled widgets this render did not reuse.
+            for (int i = lineUsed; i < linePool.Count; i++) if (linePool[i].go) linePool[i].go.SetActive(false);
+            for (int i = statRowUsed; i < statRowPool.Count; i++) if (statRowPool[i].go) statRowPool[i].go.SetActive(false);
 
             // Shrink the panel so it ends one line below the item row (no trailing empty space).
             float contentBottom = vi > 0 ? (y - SLOT) : y;
@@ -1056,14 +1073,24 @@ namespace BornAgainM
             catch { }
         }
 
-        /// <summary>Build a row of blessing icons resolved from their definitions.</summary>
-        private GameObject MakeIconRow(List<ushort> types, float y)
+        /// <summary>Claim the single pooled blessing-icon row and fill it from the given types,
+        /// reusing icon images and hiding any surplus.</summary>
+        private void AcquireIconRow(List<ushort> types, float y)
         {
-            var go = new GameObject("Blessings");
-            go.transform.SetParent(statsPanel.transform, false);
-            var rt = go.AddComponent<RectTransform>();
-            rt.anchorMin = new Vector2(0, 1); rt.anchorMax = new Vector2(1, 1); rt.pivot = new Vector2(.5f, 1);
-            rt.anchoredPosition = new Vector2(0, y); rt.sizeDelta = new Vector2(-16, 26);
+            if (blessingRow == null)
+            {
+                blessingRow = new IconRowWidget();
+                var go = new GameObject("Blessings");
+                go.transform.SetParent(statsPanel.transform, false);
+                blessingRow.rt = go.AddComponent<RectTransform>();
+                blessingRow.rt.anchorMin = new Vector2(0, 1); blessingRow.rt.anchorMax = new Vector2(1, 1);
+                blessingRow.rt.pivot = new Vector2(.5f, 1); blessingRow.rt.sizeDelta = new Vector2(-16, 26);
+                blessingRow.go = go;
+            }
+            blessingRow.go.SetActive(true);
+            blessingRow.rt.anchoredPosition = new Vector2(0, y);
+
+            int idx = 0;
             float x = 10f;
             foreach (var t in types)
             {
@@ -1075,116 +1102,143 @@ namespace BornAgainM
                 }
                 catch { }
                 if (sp == null) continue;
-                var ic = new GameObject("B");
-                ic.transform.SetParent(go.transform, false);
-                var irt = ic.AddComponent<RectTransform>();
-                irt.anchorMin = irt.anchorMax = new Vector2(0, .5f); irt.pivot = new Vector2(0, .5f);
-                irt.anchoredPosition = new Vector2(x, 0); irt.sizeDelta = new Vector2(24, 24);
-                var img = ic.AddComponent<Image>();
-                img.sprite = sp; img.preserveAspect = true; img.raycastTarget = false;
-                img.color = Color.white; img.material = null;
+
+                Image img;
+                if (idx < blessingRow.icons.Count) { img = blessingRow.icons[idx]; img.gameObject.SetActive(true); }
+                else
+                {
+                    var ic = new GameObject("B");
+                    ic.transform.SetParent(blessingRow.go.transform, false);
+                    var irt = ic.AddComponent<RectTransform>();
+                    irt.anchorMin = irt.anchorMax = new Vector2(0, .5f); irt.pivot = new Vector2(0, .5f);
+                    irt.sizeDelta = new Vector2(24, 24);
+                    img = ic.AddComponent<Image>();
+                    img.preserveAspect = true; img.raycastTarget = false; img.material = null;
+                    blessingRow.icons.Add(img);
+                }
+                img.rectTransform.anchoredPosition = new Vector2(x, 0);
+                img.sprite = sp; img.color = Color.white;
                 x += 28f;
+                idx++;
             }
-            return go;
+            for (int i = idx; i < blessingRow.icons.Count; i++)
+                if (blessingRow.icons[i]) blessingRow.icons[i].gameObject.SetActive(false);
         }
 
-        /// <summary>Build a simple "label : value" line (thread, section titles, etc.).</summary>
-        private GameObject MakeLine(string label, string value, Color valueColor, float y)
+        /// <summary>Claim a pooled "label : value" line (thread, section titles, etc.), repositioned
+        /// and retexted; the value column is hidden when empty.</summary>
+        private void AcquireLine(string label, string value, Color valueColor, float y)
         {
-            var go = new GameObject($"Line_{label}");
-            go.transform.SetParent(statsPanel.transform, false);
-            var rt = go.AddComponent<RectTransform>();
-            rt.anchorMin = new Vector2(0, 1);
-            rt.anchorMax = new Vector2(1, 1);
-            rt.pivot = new Vector2(.5f, 1);
-            rt.anchoredPosition = new Vector2(0, y);
-            rt.sizeDelta = new Vector2(-16, 20);
-
-            var lblTmp = MakeTmp(go.transform, new Vector2(8, 0), new Vector2(120, 20), 12,
-                                 new Color(.72f, .85f, 1f, 1f), TextAlignmentOptions.Left, bold: true);
-            lblTmp.rectTransform.anchorMin = new Vector2(0, .5f);
-            lblTmp.rectTransform.anchorMax = new Vector2(0, .5f);
-            lblTmp.rectTransform.pivot = new Vector2(0, .5f);
-            lblTmp.text = label;
-
-            if (!string.IsNullOrEmpty(value))
+            LineWidget w;
+            if (lineUsed < linePool.Count) { w = linePool[lineUsed]; }
+            else
             {
-                var valTmp = MakeTmp(go.transform, new Vector2(-6, 0), new Vector2(160, 20), 12,
-                                     valueColor, TextAlignmentOptions.Right, bold: true);
-                valTmp.rectTransform.anchorMin = new Vector2(1, .5f);
-                valTmp.rectTransform.anchorMax = new Vector2(1, .5f);
-                valTmp.rectTransform.pivot = new Vector2(1, .5f);
-                valTmp.text = value;
+                w = new LineWidget();
+                var go = new GameObject("Line");
+                go.transform.SetParent(statsPanel.transform, false);
+                w.rt = go.AddComponent<RectTransform>();
+                w.rt.anchorMin = new Vector2(0, 1); w.rt.anchorMax = new Vector2(1, 1);
+                w.rt.pivot = new Vector2(.5f, 1); w.rt.sizeDelta = new Vector2(-16, 20);
+                w.go = go;
+
+                w.label = MakeTmp(go.transform, new Vector2(8, 0), new Vector2(120, 20), 12,
+                                  new Color(.72f, .85f, 1f, 1f), TextAlignmentOptions.Left, bold: true);
+                w.label.rectTransform.anchorMin = new Vector2(0, .5f);
+                w.label.rectTransform.anchorMax = new Vector2(0, .5f);
+                w.label.rectTransform.pivot = new Vector2(0, .5f);
+
+                w.value = MakeTmp(go.transform, new Vector2(-6, 0), new Vector2(160, 20), 12,
+                                  Color.white, TextAlignmentOptions.Right, bold: true);
+                w.value.rectTransform.anchorMin = new Vector2(1, .5f);
+                w.value.rectTransform.anchorMax = new Vector2(1, .5f);
+                w.value.rectTransform.pivot = new Vector2(1, .5f);
+                linePool.Add(w);
             }
-            return go;
+
+            w.go.SetActive(true);
+            w.rt.anchoredPosition = new Vector2(0, y);
+            w.label.text = label;
+            bool hasVal = !string.IsNullOrEmpty(value);
+            w.value.gameObject.SetActive(hasVal);
+            if (hasVal) { w.value.text = value; w.value.color = valueColor; }
+            lineUsed++;
         }
 
-        /// <summary>Build a primary-stat row: native stat icon, stat name, and two right-aligned
-        /// numeric columns — base value (left, dimmed) and functional total (right, with a green
-        /// "(+delta)" when equipment changes it).</summary>
-        private GameObject MakeStatRow(StatType st, int bse, int fct, float y)
+        /// <summary>Claim a pooled primary-stat row: native stat icon, stat name, and two
+        /// right-aligned numeric columns — base value (left, dimmed) and functional total (right,
+        /// with a green "(+delta)" when equipment changes it).</summary>
+        private void AcquireStat(StatType st, int bse, int fct, float y)
         {
-            var go = new GameObject($"Stat_{st}");
-            go.transform.SetParent(statsPanel.transform, false);
-            var rt = go.AddComponent<RectTransform>();
-            rt.anchorMin = new Vector2(0, 1);
-            rt.anchorMax = new Vector2(1, 1);
-            rt.pivot = new Vector2(.5f, 1);
-            rt.anchoredPosition = new Vector2(0, y);
-            rt.sizeDelta = new Vector2(-16, 26);
+            StatWidget w;
+            if (statRowUsed < statRowPool.Count) { w = statRowPool[statRowUsed]; }
+            else
+            {
+                w = new StatWidget();
+                var go = new GameObject("Stat");
+                go.transform.SetParent(statsPanel.transform, false);
+                w.rt = go.AddComponent<RectTransform>();
+                w.rt.anchorMin = new Vector2(0, 1); w.rt.anchorMax = new Vector2(1, 1);
+                w.rt.pivot = new Vector2(.5f, 1); w.rt.sizeDelta = new Vector2(-16, 26);
+                w.go = go;
 
-            // Native stat icon.
-            var icoGo = new GameObject("Icon");
-            icoGo.transform.SetParent(go.transform, false);
-            var irt = icoGo.AddComponent<RectTransform>();
-            irt.anchorMin = irt.anchorMax = new Vector2(0, .5f);
-            irt.pivot = new Vector2(0, .5f);
-            irt.anchoredPosition = new Vector2(2, 0);
-            irt.sizeDelta = new Vector2(22, 22);
-            var ico = icoGo.AddComponent<Image>();
-            ico.raycastTarget = false;
-            ico.preserveAspect = true;
-            try { if (spriteLib != null) { var sp = spriteLib.Get(st); if (sp != null) { ico.sprite = sp; ico.color = Color.white; } else ico.color = new Color(1,1,1,0); } }
-            catch { ico.color = new Color(1, 1, 1, 0); }
+                var icoGo = new GameObject("Icon");
+                icoGo.transform.SetParent(go.transform, false);
+                var irt = icoGo.AddComponent<RectTransform>();
+                irt.anchorMin = irt.anchorMax = new Vector2(0, .5f);
+                irt.pivot = new Vector2(0, .5f);
+                irt.anchoredPosition = new Vector2(2, 0);
+                irt.sizeDelta = new Vector2(22, 22);
+                w.icon = icoGo.AddComponent<Image>();
+                w.icon.raycastTarget = false;
+                w.icon.preserveAspect = true;
 
-            // Stat name.
-            var nameTmp = MakeTmp(go.transform, new Vector2(30, 0), new Vector2(130, 26), 16,
-                                  new Color(.78f, .88f, 1f, 1f), TextAlignmentOptions.Left, bold: true);
-            nameTmp.rectTransform.anchorMin = new Vector2(0, .5f);
-            nameTmp.rectTransform.anchorMax = new Vector2(0, .5f);
-            nameTmp.rectTransform.pivot = new Vector2(0, .5f);
-            nameTmp.text = st.ToString();
+                w.name = MakeTmp(go.transform, new Vector2(30, 0), new Vector2(130, 26), 16,
+                                 new Color(.78f, .88f, 1f, 1f), TextAlignmentOptions.Left, bold: true);
+                w.name.rectTransform.anchorMin = new Vector2(0, .5f);
+                w.name.rectTransform.anchorMax = new Vector2(0, .5f);
+                w.name.rectTransform.pivot = new Vector2(0, .5f);
+
+                w.baseVal = MakeTmp(go.transform, new Vector2(-112, 0), new Vector2(60, 26), 17,
+                                    new Color(.62f, .68f, .78f, 1f), TextAlignmentOptions.Right, bold: true);
+                w.baseVal.rectTransform.anchorMin = new Vector2(1, .5f);
+                w.baseVal.rectTransform.anchorMax = new Vector2(1, .5f);
+                w.baseVal.rectTransform.pivot = new Vector2(1, .5f);
+
+                w.value = MakeTmp(go.transform, new Vector2(-6, 0), new Vector2(104, 26), 17,
+                                  Color.white, TextAlignmentOptions.Right, bold: true);
+                w.value.rectTransform.anchorMin = new Vector2(1, .5f);
+                w.value.rectTransform.anchorMax = new Vector2(1, .5f);
+                w.value.rectTransform.pivot = new Vector2(1, .5f);
+                w.value.richText = true;
+                statRowPool.Add(w);
+            }
+
+            w.go.SetActive(true);
+            w.rt.anchoredPosition = new Vector2(0, y);
+
+            try
+            {
+                if (spriteLib != null) { var sp = spriteLib.Get(st); if (sp != null) { w.icon.sprite = sp; w.icon.color = Color.white; } else w.icon.color = new Color(1, 1, 1, 0); }
+                else w.icon.color = new Color(1, 1, 1, 0);
+            }
+            catch { w.icon.color = new Color(1, 1, 1, 0); }
+
+            w.name.text = st.ToString();
 
             int d = fct - bse;
-
-            // Left column: base value (dimmed), right-aligned so the digits stack cleanly.
-            var baseTmp = MakeTmp(go.transform, new Vector2(-112, 0), new Vector2(60, 26), 17,
-                                  new Color(.62f, .68f, .78f, 1f), TextAlignmentOptions.Right, bold: true);
-            baseTmp.rectTransform.anchorMin = new Vector2(1, .5f);
-            baseTmp.rectTransform.anchorMax = new Vector2(1, .5f);
-            baseTmp.rectTransform.pivot = new Vector2(1, .5f);
-            baseTmp.text = bse.ToString();
-
-            // Right column: functional total, right-aligned to the panel edge.
-            var valTmp = MakeTmp(go.transform, new Vector2(-6, 0), new Vector2(104, 26), 17,
-                                 Color.white, TextAlignmentOptions.Right, bold: true);
-            valTmp.rectTransform.anchorMin = new Vector2(1, .5f);
-            valTmp.rectTransform.anchorMax = new Vector2(1, .5f);
-            valTmp.rectTransform.pivot = new Vector2(1, .5f);
-            valTmp.richText = true;
+            w.baseVal.text = bse.ToString();
             if (d != 0)
             {
                 string sign = d >= 0 ? "+" : "";
-                valTmp.text =
+                w.value.text =
                     $"<color=#FFFFFF>{fct}</color> " +
                     $"<color=#FFFFFF>(</color><color=#5CFF72>{sign}{d}</color><color=#FFFFFF>)</color>";
             }
             else
             {
-                valTmp.text = $"<color=#FFFFFF>{fct}</color>";
+                w.value.text = $"<color=#FFFFFF>{fct}</color>";
             }
-
-            return go;
+            statRowUsed++;
         }
 
         // ------------------------------------------------------------------

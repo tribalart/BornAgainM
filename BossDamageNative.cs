@@ -290,9 +290,32 @@ namespace BornAgainM
         private string selectedBossName = "";
         private string selectedPlayer = "";  // selected attacker -> details panel
 
-        private readonly List<GameObject> bossEls = new();
-        private readonly List<GameObject> statsEls = new();
-        private readonly List<GameObject> detailEls = new();
+        private readonly RowPool bossPool = new();
+        private readonly RowPool statsPool = new();
+        private readonly RowPool detailPool = new();
+
+        /// <summary>A reusable list row: one background/button plus a set of text columns. Rows and
+        /// their columns are kept alive between refreshes; only their values (text, color, width,
+        /// position, click action) are updated, so a warm pool allocates nothing on refresh.</summary>
+        private class PooledRow
+        {
+            public GameObject go;
+            public RectTransform rt;
+            public Image bg;
+            public Button btn;
+            public Action onClick;
+            public readonly List<TextMeshProUGUI> cols = new();
+            public int usedCols;
+        }
+
+        /// <summary>A pool of rows for one panel's list. <see cref="used"/> is how many rows the
+        /// current refresh has claimed; rows past that are hidden rather than destroyed.</summary>
+        private class RowPool
+        {
+            public GameObject list;
+            public readonly List<PooledRow> rows = new();
+            public int used;
+        }
 
         // ---- layout (boss list mirrors the Online Players list; the other panels stack leftward) ----
         private const float BOSS_W = 210f;
@@ -359,6 +382,10 @@ namespace BornAgainM
             detailsPanel = MakePanel("DetailsPanel", new Vector2(-(10 + BOSS_W + 8 + STATS_W + 8), TOP_Y), DETAILS_W, out detailsList, "ATTACKS", withReset: false);
             statsPanel.SetActive(false);
             detailsPanel.SetActive(false);
+
+            bossPool.list = bossList;
+            statsPool.list = statsList;
+            detailPool.list = detailsList;
 
             canvas.SetActive(false);
         }
@@ -486,8 +513,7 @@ namespace BornAgainM
         /// <summary>Boss list: names grouped from the instances, each expandable to its ids.</summary>
         private void RefreshBossList()
         {
-            foreach (var e in bossEls) { try { if (e) UnityEngine.Object.Destroy(e); } catch { } }
-            bossEls.Clear();
+            BeginPool(bossPool);
 
             var groups = BossHitPatch.Bosses.Values
                 .GroupBy(b => b.name)
@@ -498,7 +524,10 @@ namespace BornAgainM
             float y = 0f;
             if (groups.Count == 0)
             {
-                bossEls.Add(Label(bossList, "No boss damage yet", y, new Color(.7f, .7f, .7f, 1f), BOSS_W));
+                var empty = AcquireRow(bossPool, y, 20f, new Color(0, 0, 0, 0), null);
+                AcquireCol(empty, 0f, 1f, TextAlignmentOptions.Left, 12, new Color(.7f, .7f, .7f, 1f), "No boss damage yet");
+                EndRow(empty);
+                EndPool(bossPool);
                 SizePanel(bossPanel, 30f);
                 return;
             }
@@ -507,12 +536,13 @@ namespace BornAgainM
             {
                 bool open = g.Name == openName;
                 string gname = g.Name;
-                var header = Row(bossList, y, 25f, open ? new Color(.12f, .28f, .48f, .95f) : new Color(.08f, .12f, .20f, .9f),
-                                 () => { try { EventSystem.current?.SetSelectedGameObject(null); } catch { } openName = (openName == gname) ? "" : gname; RefreshUI(); });
-                Col(header, 0f, .72f, TextAlignmentOptions.Left, 13, new Color(.85f, .95f, 1f, 1f),
+                var header = AcquireRow(bossPool, y, 25f,
+                    open ? new Color(.12f, .28f, .48f, .95f) : new Color(.08f, .12f, .20f, .9f),
+                    () => { try { EventSystem.current?.SetSelectedGameObject(null); } catch { } openName = (openName == gname) ? "" : gname; RefreshUI(); });
+                AcquireCol(header, 0f, .72f, TextAlignmentOptions.Left, 13, new Color(.85f, .95f, 1f, 1f),
                     (open ? "▼ " : "▶ ") + Trim(g.Name, 16) + (g.Instances.Count > 1 ? $"  ({g.Instances.Count})" : ""));
-                Col(header, .72f, 1f, TextAlignmentOptions.Right, 13, new Color(.55f, .65f, .9f, 1f), BossHitPatch.Fmt(g.Total));
-                bossEls.Add(header);
+                AcquireCol(header, .72f, 1f, TextAlignmentOptions.Right, 13, new Color(.55f, .65f, .9f, 1f), BossHitPatch.Fmt(g.Total));
+                EndRow(header);
                 y -= 25f;
 
                 if (!open) continue;
@@ -521,14 +551,16 @@ namespace BornAgainM
                 {
                     bool sel = inst.id == selectedInstance;
                     uint iid = inst.id; string iname = g.Name;
-                    var irow = Row(bossList, y, 22f, sel ? new Color(.20f, .45f, .70f, .98f) : new Color(.10f, .20f, .36f, .95f),
-                                   () => { OnInstanceClick(iname, iid); });
-                    Col(irow, 0f, .6f, TextAlignmentOptions.Left, 12, Color.white, $"   id:{inst.id}");
-                    Col(irow, .6f, 1f, TextAlignmentOptions.Right, 12, new Color(.55f, .68f, .85f, 1f), BossHitPatch.Fmt(inst.Total));
-                    bossEls.Add(irow);
+                    var irow = AcquireRow(bossPool, y, 22f,
+                        sel ? new Color(.20f, .45f, .70f, .98f) : new Color(.10f, .20f, .36f, .95f),
+                        () => { OnInstanceClick(iname, iid); });
+                    AcquireCol(irow, 0f, .6f, TextAlignmentOptions.Left, 12, Color.white, $"   id:{inst.id}");
+                    AcquireCol(irow, .6f, 1f, TextAlignmentOptions.Right, 12, new Color(.55f, .68f, .85f, 1f), BossHitPatch.Fmt(inst.Total));
+                    EndRow(irow);
                     y -= 22f;
                 }
             }
+            EndPool(bossPool);
             SizePanel(bossPanel, -y + 6f);
         }
 
@@ -559,24 +591,23 @@ namespace BornAgainM
         private void RefreshStats()
         {
             if (!statsPanel.activeSelf) return;
-            foreach (var e in statsEls) { try { if (e) UnityEngine.Object.Destroy(e); } catch { } }
-            statsEls.Clear();
+            BeginPool(statsPool);
 
             BossHitPatch.BossInstance inst = null;
             BossHitPatch.Bosses.TryGetValue(selectedInstance, out inst);
-            if (inst == null || inst.name != selectedBossName) { statsPanel.SetActive(false); return; }
+            if (inst == null || inst.name != selectedBossName) { EndPool(statsPool); statsPanel.SetActive(false); return; }
 
             // Header text.
             SetHeader(statsPanel, $"{Trim(inst.name, 20)}  id:{inst.id}");
 
             float y = 0f;
             // Column header.
-            var colh = Row(statsList, y, 16f, new Color(.06f, .10f, .18f, .95f), null);
-            Col(colh, 0f, .40f, TextAlignmentOptions.Left, 11, new Color(.6f, .75f, .95f, 1f), "NAME");
-            Col(colh, .40f, .62f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "DAMAGE");
-            Col(colh, .62f, .74f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "%");
-            Col(colh, .74f, 1f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "MAX");
-            statsEls.Add(colh);
+            var colh = AcquireRow(statsPool, y, 16f, new Color(.06f, .10f, .18f, .95f), null);
+            AcquireCol(colh, 0f, .40f, TextAlignmentOptions.Left, 11, new Color(.6f, .75f, .95f, 1f), "NAME");
+            AcquireCol(colh, .40f, .62f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "DAMAGE");
+            AcquireCol(colh, .62f, .74f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "%");
+            AcquireCol(colh, .74f, 1f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "MAX");
+            EndRow(colh);
             y -= 18f;
 
             long total = inst.Total;
@@ -591,15 +622,16 @@ namespace BornAgainM
                                  : (local ? new Color(.16f, .16f, .10f, .9f)
                                           : (i % 2 == 0 ? new Color(.08f, .12f, .20f, .9f) : new Color(.06f, .09f, .16f, .9f)));
                 string cur = pname;
-                var row = Row(statsList, y, 20f, rowCol, () => OnPlayerClick(cur));
+                var row = AcquireRow(statsPool, y, 20f, rowCol, () => OnPlayerClick(cur));
                 float pct = total > 0 ? (float)ps.TotalDamage / total * 100f : 0f;
-                Col(row, 0f, .40f, TextAlignmentOptions.Left, 13, Color.white, $"{i + 1}. {Trim(pname, 12)}");
-                Col(row, .40f, .62f, TextAlignmentOptions.Right, 13, new Color(.85f, .95f, 1f, 1f), BossHitPatch.Fmt(ps.TotalDamage));
-                Col(row, .62f, .74f, TextAlignmentOptions.Right, 12, new Color(.60f, .75f, .95f, 1f), $"{pct:F1}%");
-                Col(row, .74f, 1f, TextAlignmentOptions.Right, 12, new Color(.75f, .90f, 1f, 1f), BossHitPatch.Fmt(ps.MaxHit));
-                statsEls.Add(row);
+                AcquireCol(row, 0f, .40f, TextAlignmentOptions.Left, 13, Color.white, $"{i + 1}. {Trim(pname, 12)}");
+                AcquireCol(row, .40f, .62f, TextAlignmentOptions.Right, 13, new Color(.85f, .95f, 1f, 1f), BossHitPatch.Fmt(ps.TotalDamage));
+                AcquireCol(row, .62f, .74f, TextAlignmentOptions.Right, 12, new Color(.60f, .75f, .95f, 1f), $"{pct:F1}%");
+                AcquireCol(row, .74f, 1f, TextAlignmentOptions.Right, 12, new Color(.75f, .90f, 1f, 1f), BossHitPatch.Fmt(ps.MaxHit));
+                EndRow(row);
                 y -= 20f;
             }
+            EndPool(statsPool);
             SizePanel(statsPanel, -y + 6f);
         }
 
@@ -623,41 +655,40 @@ namespace BornAgainM
         private void RefreshDetails()
         {
             if (!detailsPanel.activeSelf) return;
-            foreach (var e in detailEls) { try { if (e) UnityEngine.Object.Destroy(e); } catch { } }
-            detailEls.Clear();
+            BeginPool(detailPool);
 
             BossHitPatch.BossInstance inst = null;
             BossHitPatch.Bosses.TryGetValue(selectedInstance, out inst);
             if (inst == null || !inst.byPlayer.TryGetValue(selectedPlayer, out var ps))
-            { detailsPanel.SetActive(false); return; }
+            { EndPool(detailPool); detailsPanel.SetActive(false); return; }
 
             SetHeader(detailsPanel, $"{Trim(selectedPlayer, 20)} — ATTACKS");
 
             float y = 0f;
-            var colh = Row(detailsList, y, 16f, new Color(.06f, .10f, .18f, .95f), null);
-            Col(colh, 0f, .40f, TextAlignmentOptions.Left, 11, new Color(.6f, .75f, .95f, 1f), "ATTACK");
-            Col(colh, .40f, .52f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "HITS");
-            Col(colh, .52f, .70f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "DAMAGE");
-            Col(colh, .70f, .82f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "AVG");
-            Col(colh, .82f, 1f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "MAX");
-            detailEls.Add(colh);
+            var colh = AcquireRow(detailPool, y, 16f, new Color(.06f, .10f, .18f, .95f), null);
+            AcquireCol(colh, 0f, .40f, TextAlignmentOptions.Left, 11, new Color(.6f, .75f, .95f, 1f), "ATTACK");
+            AcquireCol(colh, .40f, .52f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "HITS");
+            AcquireCol(colh, .52f, .70f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "DAMAGE");
+            AcquireCol(colh, .70f, .82f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "AVG");
+            AcquireCol(colh, .82f, 1f, TextAlignmentOptions.Right, 11, new Color(.6f, .75f, .95f, 1f), "MAX");
+            EndRow(colh);
             y -= 18f;
 
-            long totalDmg = ps.TotalDamage;
             var sorted = ps.AttacksByType.OrderByDescending(x => x.Value.TotalDamage).ToList();
             for (int i = 0; i < sorted.Count; i++)
             {
                 var ai = sorted[i].Value;
-                var row = Row(detailsList, y, 20f, i % 2 == 0 ? new Color(.08f, .12f, .20f, .92f) : new Color(.06f, .09f, .16f, .92f), null);
+                var row = AcquireRow(detailPool, y, 20f, i % 2 == 0 ? new Color(.08f, .12f, .20f, .92f) : new Color(.06f, .09f, .16f, .92f), null);
                 int avg = ai.Count > 0 ? ai.TotalDamage / ai.Count : 0;
-                Col(row, 0f, .40f, TextAlignmentOptions.Left, 12, new Color(.80f, .88f, 1f, 1f), Trim(sorted[i].Key, 18));
-                Col(row, .40f, .52f, TextAlignmentOptions.Right, 12, new Color(.75f, .85f, 1f, 1f), ai.Count.ToString());
-                Col(row, .52f, .70f, TextAlignmentOptions.Right, 12, new Color(.85f, .95f, 1f, 1f), BossHitPatch.Fmt(ai.TotalDamage));
-                Col(row, .70f, .82f, TextAlignmentOptions.Right, 12, new Color(.70f, .82f, 1f, 1f), BossHitPatch.Fmt(avg));
-                Col(row, .82f, 1f, TextAlignmentOptions.Right, 12, new Color(.75f, .90f, 1f, 1f), BossHitPatch.Fmt(ai.MaxDamage));
-                detailEls.Add(row);
+                AcquireCol(row, 0f, .40f, TextAlignmentOptions.Left, 12, new Color(.80f, .88f, 1f, 1f), Trim(sorted[i].Key, 18));
+                AcquireCol(row, .40f, .52f, TextAlignmentOptions.Right, 12, new Color(.75f, .85f, 1f, 1f), ai.Count.ToString());
+                AcquireCol(row, .52f, .70f, TextAlignmentOptions.Right, 12, new Color(.85f, .95f, 1f, 1f), BossHitPatch.Fmt(ai.TotalDamage));
+                AcquireCol(row, .70f, .82f, TextAlignmentOptions.Right, 12, new Color(.70f, .82f, 1f, 1f), BossHitPatch.Fmt(avg));
+                AcquireCol(row, .82f, 1f, TextAlignmentOptions.Right, 12, new Color(.75f, .90f, 1f, 1f), BossHitPatch.Fmt(ai.MaxDamage));
+                EndRow(row);
                 y -= 20f;
             }
+            EndPool(detailPool);
             SizePanel(detailsPanel, -y + 6f);
         }
 
@@ -677,58 +708,89 @@ namespace BornAgainM
             panel.GetComponent<RectTransform>().sizeDelta = new Vector2(panel.GetComponent<RectTransform>().sizeDelta.x, HEADER_H + bodyH);
         }
 
-        /// <summary>Create a row (background + optional button) parented to a panel's list.</summary>
-        private GameObject Row(GameObject list, float y, float h, Color bg, Action onClick)
+        /// <summary>Reset a pool for a new refresh pass (no rows claimed yet).</summary>
+        private static void BeginPool(RowPool pool) => pool.used = 0;
+
+        /// <summary>Claim the next row from the pool (creating it only if the pool is not deep
+        /// enough), position it, set its background and click action, and ready it for columns. The
+        /// button and background are reused; the per-refresh handler lives in <see cref="PooledRow.onClick"/>.</summary>
+        private PooledRow AcquireRow(RowPool pool, float y, float h, Color bg, Action onClick)
         {
-            var go = new GameObject("Row");
-            go.transform.SetParent(list.transform, false);
-            var rt = go.AddComponent<RectTransform>();
-            rt.anchorMin = new Vector2(0, 1); rt.anchorMax = new Vector2(1, 1);
-            rt.pivot = new Vector2(.5f, 1);
-            rt.anchoredPosition = new Vector2(0, y);
-            rt.sizeDelta = new Vector2(-8, h);
-            var img = go.AddComponent<Image>();
-            img.color = bg; img.raycastTarget = onClick != null;
-            if (onClick != null)
+            PooledRow row;
+            if (pool.used < pool.rows.Count)
             {
-                var btn = go.AddComponent<Button>();
-                btn.targetGraphic = img;
-                var nav = btn.navigation; nav.mode = Navigation.Mode.None; btn.navigation = nav;
-                btn.onClick.AddListener((UnityAction)(() => onClick()));
+                row = pool.rows[pool.used];
             }
-            return go;
+            else
+            {
+                row = new PooledRow();
+                var go = new GameObject("Row");
+                go.transform.SetParent(pool.list.transform, false);
+                row.rt = go.AddComponent<RectTransform>();
+                row.rt.anchorMin = new Vector2(0, 1); row.rt.anchorMax = new Vector2(1, 1);
+                row.rt.pivot = new Vector2(.5f, 1);
+                row.bg = go.AddComponent<Image>();
+                row.btn = go.AddComponent<Button>();
+                row.btn.targetGraphic = row.bg;
+                var nav = row.btn.navigation; nav.mode = Navigation.Mode.None; row.btn.navigation = nav;
+                // Single persistent listener; the live action is swapped per refresh via row.onClick.
+                row.btn.onClick.AddListener((UnityAction)(() => row.onClick?.Invoke()));
+                row.go = go;
+                pool.rows.Add(row);
+            }
+
+            row.go.SetActive(true);
+            row.rt.anchoredPosition = new Vector2(0, y);
+            row.rt.sizeDelta = new Vector2(-8, h);
+            row.bg.color = bg;
+            row.bg.raycastTarget = onClick != null;   // non-clickable rows let the click pass through
+            row.onClick = onClick;
+            row.usedCols = 0;
+            pool.used++;
+            return row;
         }
 
-        /// <summary>Add a fractional-width text column to a row.</summary>
-        private TextMeshProUGUI Col(GameObject row, float x0, float x1, TextAlignmentOptions align, float size, Color color, string text)
+        /// <summary>Claim the next text column of a row (creating it only if needed) and set its
+        /// fractional span, alignment, size, color and text.</summary>
+        private TextMeshProUGUI AcquireCol(PooledRow row, float x0, float x1, TextAlignmentOptions align,
+                                           float size, Color color, string text)
         {
-            var go = new GameObject("c");
-            go.transform.SetParent(row.transform, false);
-            var rt = go.AddComponent<RectTransform>();
-            rt.anchorMin = new Vector2(x0, 0f); rt.anchorMax = new Vector2(x1, 1f);
-            rt.offsetMin = new Vector2(4, 0); rt.offsetMax = new Vector2(-4, 0);
-            var t = go.AddComponent<TextMeshProUGUI>();
-            ApplyFont(t);
+            TextMeshProUGUI t;
+            if (row.usedCols < row.cols.Count)
+            {
+                t = row.cols[row.usedCols];
+                t.gameObject.SetActive(true);
+            }
+            else
+            {
+                var go = new GameObject("c");
+                go.transform.SetParent(row.go.transform, false);
+                go.AddComponent<RectTransform>();
+                t = go.AddComponent<TextMeshProUGUI>();
+                ApplyFont(t);
+                t.raycastTarget = false; t.enableWordWrapping = false; t.overflowMode = TextOverflowModes.Ellipsis;
+                row.cols.Add(t);
+            }
+            var crt = t.rectTransform;
+            crt.anchorMin = new Vector2(x0, 0f); crt.anchorMax = new Vector2(x1, 1f);
+            crt.offsetMin = new Vector2(4, 0); crt.offsetMax = new Vector2(-4, 0);
             t.fontSize = size; t.color = color; t.alignment = align; t.text = text;
-            t.raycastTarget = false; t.enableWordWrapping = false; t.overflowMode = TextOverflowModes.Ellipsis;
+            row.usedCols++;
             return t;
         }
 
-        private GameObject Label(GameObject list, string text, float y, Color color, float width)
+        /// <summary>Hide the columns of a row that this refresh did not reuse.</summary>
+        private static void EndRow(PooledRow row)
         {
-            var go = new GameObject("Label");
-            go.transform.SetParent(list.transform, false);
-            var rt = go.AddComponent<RectTransform>();
-            rt.anchorMin = new Vector2(0, 1); rt.anchorMax = new Vector2(1, 1);
-            rt.pivot = new Vector2(.5f, 1); rt.anchoredPosition = new Vector2(0, y);
-            rt.sizeDelta = new Vector2(-10, 20);
-            var tmp = MakeTmp(go.transform, new Vector2(8, 0), new Vector2(width - 16, 20), 12,
-                              color, TextAlignmentOptions.Left, bold: true);
-            tmp.rectTransform.anchorMin = new Vector2(0, .5f);
-            tmp.rectTransform.anchorMax = new Vector2(0, .5f);
-            tmp.rectTransform.pivot = new Vector2(0, .5f);
-            tmp.text = text; tmp.raycastTarget = false;
-            return go;
+            for (int i = row.usedCols; i < row.cols.Count; i++)
+                if (row.cols[i]) row.cols[i].gameObject.SetActive(false);
+        }
+
+        /// <summary>Hide the rows of a pool that this refresh did not reuse.</summary>
+        private static void EndPool(RowPool pool)
+        {
+            for (int i = pool.used; i < pool.rows.Count; i++)
+                if (pool.rows[i].go) pool.rows[i].go.SetActive(false);
         }
 
         private void ApplyFont(TextMeshProUGUI tmp)
