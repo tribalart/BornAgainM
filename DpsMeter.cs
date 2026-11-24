@@ -216,6 +216,10 @@ namespace BornAgainM
             if (!isRecording) return;
             isRecording = false;
 
+            // Window actually recorded (usually DPS_DURATION, but shorter if stopped early).
+            float elapsed = Time.time - startTime;
+            if (elapsed < 0.1f) elapsed = DPS_DURATION;
+
             if (players.Count == 0)
             {
                 PostChat("DPS Meter stopped: No attacks recorded.");
@@ -223,13 +227,15 @@ namespace BornAgainM
                 return;
             }
 
-            PostChat("=== DPS Meter Results ===");
+            // Three lines per player: window header, the headline DPS/total, then the detail stats.
+            PostChat($"=== DPS Meter Results ({elapsed:F0}s) ===");
 
             foreach (var kvp in players)
             {
                 var p = kvp.Value;
-                string msg = $"{p.Name} - Total: {p.TotalDamage} dmg | Hits: {p.HitCount} | Max: {p.MaxHit} | Min: {p.MinHit} | Avg: {p.AvgHit:F1}";
-                PostChat(msg);
+                double dps = p.TotalDamage / elapsed;   // damage over the window reduced to per-second
+                PostChat($"{p.Name} | DPS: {dps:F1} | Total: {p.TotalDamage} dmg");
+                PostChat($"Hits: {p.HitCount} | True: {p.TrueDamageCount} | Min: {p.MinHit} | Max: {p.MaxHit} | Avg: {p.AvgHit:F1}");
             }
             foreach (var kvp in players)
             {
