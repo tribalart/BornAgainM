@@ -40,6 +40,7 @@ namespace BornAgainM
         {
             public int Damage;
             public bool IsTrueDamage;
+            public bool IsCrit;
             public uint TargetsHit;
             public float Time;
             public string AttackType;
@@ -65,6 +66,7 @@ namespace BornAgainM
             public int MinHit => Attacks.Count > 0 ? Attacks.Min(a => a.Damage) : 0;
             public double AvgHit => Attacks.Count > 0 ? Attacks.Average(a => a.Damage) : 0;
             public int TrueDamageCount => Attacks.Count(a => a.IsTrueDamage);
+            public int CritCount => Attacks.Count(a => a.IsCrit);
             public int TrueDamageTotal => Attacks.Where(a => a.IsTrueDamage).Sum(a => a.Damage);
         }
 
@@ -176,6 +178,7 @@ namespace BornAgainM
                     {
                         Damage = atk.Damage,
                         IsTrueDamage = atk.TrueDamage,
+                        IsCrit = (atk.Flags & AttackFlags.CriticalStrike) == AttackFlags.CriticalStrike,
                         TargetsHit = (uint)(atk.Hits?.Count ?? 0),
                         Time = Time.time,
                         AttackType = descriptor?.Type.ToString() ?? "Unknown",
@@ -235,7 +238,7 @@ namespace BornAgainM
                 var p = kvp.Value;
                 double dps = p.TotalDamage / elapsed;   // damage over the window reduced to per-second
                 PostChat($"{p.Name} | DPS: {dps:F1} | Total: {p.TotalDamage} dmg");
-                PostChat($"Hits: {p.HitCount} | True: {p.TrueDamageCount} | Min: {p.MinHit} | Max: {p.MaxHit} | Avg: {p.AvgHit:F1}");
+                PostChat($"Hits: {p.HitCount} | Crit: {p.CritCount} | True: {p.TrueDamageCount} | Min: {p.MinHit} | Max: {p.MaxHit} | Avg: {p.AvgHit:F1}");
             }
             foreach (var kvp in players)
             {
