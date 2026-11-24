@@ -20,7 +20,7 @@ not meant to break the game, affect anyone's journey, or gain an unfair advantag
 - **Boss Damage** — a consultable per-boss damage meter: pick a boss and see the per-attacker breakdown
   ("who did how much"), attributed from the simulation's live attack buffer. Damage-over-time is not tracked.
 - **Personal DPS meter** — toggle with `NumPad +`; it records your own attacks for 20 seconds and posts a
-  summary to the game chat.
+  summary to the game chat. (use on town dummy)
 - **Bank sorter** — groups identical items by swapping bank slots.
 
 ## Notes
