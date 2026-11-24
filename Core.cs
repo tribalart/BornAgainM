@@ -44,11 +44,7 @@ namespace BornAgainM
 
             try
             {
-                // Thread/blessing data is not patched here: it is read from the simulation state
-                // (EntityState.Blessings) by OnlinePlayersNative. Patching
-                // Character.HandleData(BlessingsData&) threw a NullReferenceException inside the
-                // Il2CppInterop native->managed trampoline (by-value marshalling of a fixed-buffer
-                // struct), so that patch is intentionally not registered.
+     
                 MelonLogger.Msg("Harmony patches applied successfully");
             }
             catch (Exception ex)
