@@ -10,7 +10,7 @@ not meant to break the game, affect anyone's journey, or gain an unfair advantag
 
 ## What it does
 
-- **Online Players** — a scrollable list of connected players (level tinted by thread color, name in white).
+- **Online Players** — a scrollable list of connected players in the current scene.
   Click a player to open a detail panel showing their primary stats (base / total), thread, blessings and
   equipment with native item icons and tooltips. The detail is captured at click time, so it stays readable
   even after the player leaves the area.
