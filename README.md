@@ -14,9 +14,8 @@ not meant to break the game, affect anyone's journey, or gain an unfair advantag
   Click a player to open a detail panel showing their primary stats (base / total), thread, blessings and
   equipment with native item icons and tooltips. The detail is captured at click time, so it stays readable
   even after the player leaves the area.
-- **Boss Monitor** — the bosses in the current zone, each with a portrait, name and an HP bar marking the
-  boss as alive or already dead; a spawnable boss carries no such frame, so it is recognised by the absence
-  of any alive/dead marker.
+- **Boss Monitor** — the bosses in the current zone, each with a portrait, name and status bar
+  showing whether it is alive, dead or still to be spawned.
 - **Boss Damage** — a consultable per-boss damage meter: pick a boss and see the per-attacker breakdown
   ("who did how much"), attributed from the simulation's live attack buffer. Damage-over-time is not tracked.
 - **Personal DPS meter** — toggle with `NumPad +`; it records your own attacks for 20 seconds and posts a
