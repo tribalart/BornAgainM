@@ -30,6 +30,11 @@ namespace BornAgainM
         private readonly Dictionary<uint, PlayerDPS> players = new();
         private static Il2CppSystem.Reflection.FieldInfo _attacksField;
 
+        // Resolved once when a recording starts: the meter only tracks the local player, so there is
+        // no need to re-find it or scan every Character each frame.
+        private uint localEntityId;
+        private string localName = "";
+
         /// <summary>One recorded attack and its descriptor details.</summary>
         private class AttackInfo
         {
@@ -85,28 +90,58 @@ namespace BornAgainM
             CaptureAttacks();
         }
 
-        /// <summary>Start a DPS recording window.</summary>
+        /// <summary>Start a DPS recording window, resolving the local player once up front.</summary>
         private void StartDPS()
         {
+            var local = ResolveLocalPlayer();
+            if (local == null)
+            {
+                MelonLogger.Msg("DPS Meter: local player not found");
+                PostChat("DPS Meter: local player not found.");
+                return;
+            }
+
+            try { localEntityId = local.EntityId; } catch { localEntityId = 0; }
+            string nm = null;
+            try { nm = local.EntityName; } catch { }
+            if (string.IsNullOrEmpty(nm)) { try { nm = $"Player_{local.PlayerId}"; } catch { nm = "Player"; } }
+            localName = nm;
+
             isRecording = true;
             startTime = Time.time;
             processedAttacks.Clear();
+            players.Clear();
 
             MelonLogger.Msg("=== DPS / COMBAT METER STARTED ===");
             PostChat("=== DPS STARTED for 20 Sec ===");
         }
 
-        /// <summary>Scan the simulation's attack buffer and record the local player's new attacks.</summary>
+        /// <summary>Resolve the local player: the authoritative controlled entity, falling back to
+        /// the first Character in the scene if that is unavailable.</summary>
+        private static Character ResolveLocalPlayer()
+        {
+            var world = World.Instance;
+            Character c = null;
+            if (world != null)
+            {
+                try { c = world._controlledEntity?.TryCast<Character>(); } catch { }
+            }
+            if (c == null)
+            {
+                try { c = GameObject.FindObjectOfType<Character>(); } catch { }
+            }
+            return c;
+        }
+
+        /// <summary>Scan the simulation's attack buffer and record the local player's new attacks.
+        /// Only the local player is tracked, so an attack is ours exactly when its OwnerId matches
+        /// the entity id resolved at <see cref="StartDPS"/> — no per-frame or per-attack scene scan.</summary>
         private void CaptureAttacks()
         {
             try
             {
                 var sim = World.Instance?.Simulation;
                 if (sim == null) return;
-
-                var localPlayer = GameObject.FindObjectOfType<Character>();
-                if (localPlayer == null) return;
-                long localPlayerId = localPlayer.PlayerId;
 
                 if (_attacksField == null)
                 {
@@ -124,9 +159,6 @@ namespace BornAgainM
                 var array = fieldValue.Cast<Il2CppSystem.Array>();
                 if (array == null) return;
 
-                // Scan characters once per pass instead of once per attack.
-                var allChars = GameObject.FindObjectsOfType<Character>();
-
                 for (int i = 0; i < array.Length; i++)
                 {
                     var atkObj = array.GetValue(i);
@@ -136,32 +168,28 @@ namespace BornAgainM
                     if (atk == null) continue;
                     if (atk.Id == 0 || processedAttacks.Contains(atk.Id)) continue;
                     if (atk.Damage <= 0) continue;
+                    if (atk.OwnerId != localEntityId) continue;   // only the local player's attacks
 
-                    var character = allChars.FirstOrDefault(c => c.EntityId == atk.OwnerId);
+                    var descriptor = atk.AttackDescriptor;
 
-                    if (character != null && character.PlayerId == localPlayerId)
+                    var attackInfo = new AttackInfo
                     {
-                        var descriptor = atk.AttackDescriptor;
+                        Damage = atk.Damage,
+                        IsTrueDamage = atk.TrueDamage,
+                        TargetsHit = (uint)(atk.Hits?.Count ?? 0),
+                        Time = Time.time,
+                        AttackType = descriptor?.Type.ToString() ?? "Unknown",
+                        MinDamage = descriptor?.MinDamage ?? 0,
+                        MaxDamage = descriptor?.MaxDamage ?? 0,
+                        ArmorDamage = descriptor?.ArmorDamage ?? 0,
+                        Pierces = descriptor?.Pierces ?? false,
+                        Radius = descriptor?.Radius ?? 0f,
+                        Speed = descriptor?.Speed ?? 0f,
+                        WeaponName = descriptor?.Origin.ToString() ?? "Unknown",
+                    };
 
-                        var attackInfo = new AttackInfo
-                        {
-                            Damage = atk.Damage,
-                            IsTrueDamage = atk.TrueDamage,
-                            TargetsHit = (uint)(atk.Hits?.Count ?? 0),
-                            Time = Time.time,
-                            AttackType = descriptor?.Type.ToString() ?? "Unknown",
-                            MinDamage = descriptor?.MinDamage ?? 0,
-                            MaxDamage = descriptor?.MaxDamage ?? 0,
-                            ArmorDamage = descriptor?.ArmorDamage ?? 0,
-                            Pierces = descriptor?.Pierces ?? false,
-                            Radius = descriptor?.Radius ?? 0f,
-                            Speed = descriptor?.Speed ?? 0f,
-                            WeaponName = descriptor?.Origin.ToString() ?? "Unknown",
-                        };
-
-                        RegisterAttack(atk.OwnerId, attackInfo, character);
-                        processedAttacks.Add(atk.Id);
-                    }
+                    RegisterAttack(localEntityId, attackInfo);
+                    processedAttacks.Add(atk.Id);
                 }
             }
             catch (Exception ex)
@@ -170,19 +198,12 @@ namespace BornAgainM
             }
         }
 
-        /// <summary>Add an attack to its player's record, resolving the player name on first sight.</summary>
-        private void RegisterAttack(uint ownerId, AttackInfo attackInfo, Character character = null)
+        /// <summary>Add an attack to the (single, local) player's record.</summary>
+        private void RegisterAttack(uint ownerId, AttackInfo attackInfo)
         {
             if (!players.TryGetValue(ownerId, out var p))
             {
-                if (character == null)
-                    character = GameObject.FindObjectsOfType<Character>()
-                        .FirstOrDefault(c => c.EntityId == ownerId);
-                string name = character != null
-                    ? (!string.IsNullOrEmpty(character.EntityName) ? character.EntityName : $"Player_{character.PlayerId}")
-                    : $"Entity_{ownerId}";
-
-                p = new PlayerDPS { Name = name, OwnerId = ownerId };
+                p = new PlayerDPS { Name = localName, OwnerId = ownerId };
                 players[ownerId] = p;
             }
 
