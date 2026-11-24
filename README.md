@@ -10,9 +10,6 @@ not meant to break the game, affect anyone's journey, or gain an unfair advantag
 
 ## What it does
 
-All overlays are rebuilt with the game's own UI assets (TextMeshPro font, portrait and slot prefabs, stat
-sprites) so they match the game's look, and are read from the live simulation state.
-
 - **Online Players** — a scrollable list of connected players (level tinted by thread color, name in white).
   Click a player to open a detail panel showing their primary stats (base / total), thread, blessings and
   equipment with native item icons and tooltips. The detail is captured at click time, so it stays readable
@@ -24,12 +21,6 @@ sprites) so they match the game's look, and are read from the live simulation st
   summary to the game chat.
 - **Bank sorter** — groups identical items by swapping bank slots.
 
-## How it reads data
-
-The mod reads the game state through MelonLoader / Il2CppInterop: the authoritative player list comes from
-`World.Characters`, entity state (equipment, blessings) is read by raw pointer at known offsets, and live
-attacks come from the simulation's attack buffer. Nothing is written back to the game.
-
 ## Notes
 
 - From what I understand, the client handles **Damage Over Time** as a world message without an `ownerId`,
@@ -37,6 +28,15 @@ attacks come from the simulation's attack buffer. Nothing is written back to the
 - Secondary stats (crit / block / true damage / cooldown) are intentionally **not** shown for remote players:
   the game's total also folds in crystals, whose crystal path is local profile data never present in the
   networked entity state, so an exact total cannot be reconstructed for someone else.
+
+## Install
+
+1. Install [MelonLoader](https://melonwiki.xyz/#/) on Born Again (IL2CPP, net6) and run the game once so it
+   finishes setting itself up.
+2. Download `BornAgainM.dll` from the [Releases](https://github.com/tribalart/BornAgainM/releases) page.
+3. Drop it into the game's `Mods` folder (`...\Born Again\Mods`).
+4. Launch the game. The overlays appear with toggle buttons on the screen edges; the personal DPS meter
+   toggles with `NumPad +`.
 
 ## Build
 
