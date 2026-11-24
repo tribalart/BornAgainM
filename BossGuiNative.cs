@@ -58,7 +58,20 @@ namespace BornAgainM
             public ushort portraitType;
             public float lastSeen;      // last time seen alive/present
             public bool lastDead;       // last known dead state (used for sorting)
+            public bool spawnable;      // row built from World.GetBossLocations (no entity)
         }
+
+        // Spawnable rows are keyed by boss type with this bit set (no collision with entity ids in practice).
+        private const uint SPAWN_KEY = 0x80000000u;
+        private string lastRegion;
+        private uint lastMask;
+        private int lastVersion = -1;
+        private readonly System.Collections.Generic.List<int> zoneCandidates = new();
+        private const float MAP_SEARCH_INTERVAL = 5f;   // FindObjectsOfTypeAll<MapMinimap> retry period
+        private float lastMapSearch = -999f;
+        private const float SPAWN_SCAN_INTERVAL = 1f;
+        private float lastSpawnScan = -999f;
+        private readonly System.Collections.Generic.List<(uint key, ushort type)> spawnable = new();
 
         private const float GRACE = 4f;    // keep a vanished (invisible) boss shown for this long
 
@@ -106,8 +119,9 @@ namespace BornAgainM
                 }
                 catch { }
             }
-            if (mapMinimap == null)
+            if (mapMinimap == null && Time.time - lastMapSearch >= MAP_SEARCH_INTERVAL)
             {
+                lastMapSearch = Time.time;
                 try
                 {
                     var all = Resources.FindObjectsOfTypeAll<MapMinimap>();
@@ -169,7 +183,10 @@ namespace BornAgainM
             catch { }
         }
 
-        private struct Entry { public uint id; public Row row; public Entity ent; public bool dead; }
+        private struct Entry { public uint id; public Row row; public Entity ent; public bool dead; public bool spawnable; }
+
+        /// <summary>Sort rank: alive 0, spawnable 1, dead 2.</summary>
+        private static int Rank(Entry e) => e.spawnable ? 1 : (e.dead ? 2 : 0);
 
         /// <summary>Rebuild the boss list: take the current bosses, keep recently-vanished ones for a
         /// grace period, drop the rest, sort alive-first, then position and update each row and the
@@ -216,6 +233,7 @@ namespace BornAgainM
                 {
                     if (present.Contains(kv.Key)) continue;
                     var row = kv.Value;
+                    if (row.spawnable) continue;   // handled in step 2b
                     Entity e = null;
                     try { e = world.GetEntity(kv.Key); } catch { }
                     if (e != null)
@@ -238,8 +256,15 @@ namespace BornAgainM
                 foreach (var k in toRemove) rows.Remove(k);
             }
 
-            // 3. Sort: alive first, dead below (stable on insertion order).
-            entries.Sort((a, b) => a.dead.CompareTo(b.dead));
+            // 2b. Spawnable bosses of the player's region (bit set in World._activeBosses, the same
+            // flag that shows the boss marker on the map).
+            RefreshSpawnable(world, entries);
+
+            // 3. Sort: alive, then spawnable, then dead (stable on insertion order).
+            var keyed = new System.Collections.Generic.List<(int rank, int idx, Entry e)>(entries.Count);
+            for (int i = 0; i < entries.Count; i++) keyed.Add((Rank(entries[i]), i, entries[i]));
+            keyed.Sort((a, b) => a.rank != b.rank ? a.rank.CompareTo(b.rank) : a.idx.CompareTo(b.idx));
+            for (int i = 0; i < keyed.Count; i++) entries[i] = keyed[i].e;
 
             // 4. Position and update each row.
             for (int idx = 0; idx < entries.Count; idx++)
@@ -247,7 +272,8 @@ namespace BornAgainM
                 var en = entries[idx];
                 en.row.go.GetComponent<RectTransform>().anchoredPosition =
                     new Vector2(0, -idx * (ROW_H + ROW_GAP));
-                if (en.ent != null) { try { UpdateRow(en.row, en.ent); } catch { } }
+                if (en.spawnable) { try { UpdateSpawnableRow(en.row); } catch { } }
+                else if (en.ent != null) { try { UpdateRow(en.row, en.ent); } catch { } }
             }
 
             // 5. Fit the panel to the content height.
@@ -273,6 +299,140 @@ namespace BornAgainM
         /// centered value.</summary>
         private Row CreateRow(Entity boss)
         {
+            ushort ptype = 0;
+            try { if (boss.Definition != null) ptype = boss.Definition.Type; } catch { }
+            return CreateRow(ptype);
+        }
+
+        /// <summary>Add spawnable-boss entries and drop spawnable rows that are no longer active.
+        /// The marker logic of the game (World.GetBossLocations): bit i of World._activeBosses (server
+        /// BossSpawnData) enables the i-th entry of Map._bossLocations. That dictionary only stores a
+        /// generic marker type (0x2529); the real boss type per position comes from
+        /// <see cref="BossSpawnTable"/> (filled by the LoadMapFile postfix). The mask/dictionary walk
+        /// runs at most once per second; other refreshes reuse the cached result.</summary>
+        private void RefreshSpawnable(World world, System.Collections.Generic.List<Entry> entries)
+        {
+            if (Time.time - lastSpawnScan >= SPAWN_SCAN_INTERVAL)
+            {
+                lastSpawnScan = Time.time;
+                ScanSpawnable(world);
+            }
+
+            var shownTypes = new System.Collections.Generic.HashSet<ushort>();
+            foreach (var e in entries) if (e.row != null && e.row.portraitType != 0) shownTypes.Add(e.row.portraitType);
+
+            var active = new System.Collections.Generic.HashSet<uint>();
+            foreach (var (key, type) in spawnable)
+            {
+                if (shownTypes.Contains(type)) continue;   // boss entity already listed (alive or dead)
+                if (rows.TryGetValue(key, out var row) && row.portraitType != type)
+                {
+                    // Same bit index on another map: different boss, rebuild the row.
+                    try { if (row.go != null) UnityEngine.Object.Destroy(row.go); } catch { }
+                    rows.Remove(key);
+                    row = null;
+                }
+                if (row == null)
+                {
+                    string name = BossName(type);
+                    if (name == null) continue;             // unresolved name: do not list
+                    row = CreateRow(type);
+                    if (row == null) continue;
+                    row.spawnable = true;
+                    row.nameTmp.text = name;
+                    rows[key] = row;
+                }
+                active.Add(key);
+                row.lastSeen = Time.time;
+                entries.Add(new Entry { id = key, row = row, ent = null, dead = false, spawnable = true });
+            }
+
+            var toRemove = new System.Collections.Generic.List<uint>();
+            foreach (var kv in rows)
+                if (kv.Value.spawnable && !active.Contains(kv.Key)) toRemove.Add(kv.Key);
+            foreach (var k in toRemove)
+            {
+                try { if (rows[k].go != null) UnityEngine.Object.Destroy(rows[k].go); } catch { }
+                rows.Remove(k);
+            }
+        }
+
+        /// <summary>Spawnable bosses of the player's region. Reads two values (player region,
+        /// World._activeBosses); when neither changed since the last scan (and no map was reloaded)
+        /// the cached result is kept. The region candidates (boss locations whose area-zone region
+        /// equals the player's) are only recomputed when the region changes.</summary>
+        private void ScanSpawnable(World world)
+        {
+            string region = PlayerRegion(world);   // tile without zone: null -> no spawnable shown
+            bool sameMap = false;
+            try { sameMap = world._map != null && world._map.Pointer == BossSpawnTable.MapPtr; } catch { }
+            if (!sameMap) region = null;             // table built for another map: show nothing
+            uint mask = 0;
+            try { mask = world._activeBosses; } catch { }
+            int ver = BossSpawnTable.Version;
+            if (region == lastRegion && mask == lastMask && ver == lastVersion) return;
+
+            var locs = BossSpawnTable.Locations;
+            if (region != lastRegion || ver != lastVersion)
+            {
+                zoneCandidates.Clear();
+                if (region != null)
+                    for (int i = 0; i < locs.Count && i < 32; i++)
+                        if (locs[i].type != 0 && locs[i].region == region)
+                            zoneCandidates.Add(i);
+            }
+            lastRegion = region; lastMask = mask; lastVersion = ver;
+
+            spawnable.Clear();
+            foreach (int i in zoneCandidates)
+                if (((mask >> i) & 1u) != 0) spawnable.Add((SPAWN_KEY | (uint)i, locs[i].type));
+        }
+
+        /// <summary>Region of the player's tile: area zone found like World.SetCameraPosition
+        /// (Map.GetAreaZone(((int)x, (int)y)) of the controlled entity position), Label prefix before
+        /// '-'. Null when the tile has no zone.</summary>
+        private static string PlayerRegion(World world)
+        {
+            try
+            {
+                var e = world._controlledEntity;
+                var map = world._map;
+                if (e == null || map == null) return null;
+                var p = e._position;
+                return BossSpawnTable.RegionOf(map.GetAreaZone(new Vector2Int((int)p.x, (int)p.y)));
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Boss display name from its definition (<c>LibraryExtensions.GetDefinition(type).Name</c>).</summary>
+        private static string BossName(ushort type)
+        {
+            try
+            {
+                var def = LibraryExtensions.GetDefinition(type);
+                if (def != null && !string.IsNullOrEmpty(def.Name)) return def.Name;
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>Spawnable row: amber name, no HP bar, "spawnable" label.</summary>
+        private void UpdateSpawnableRow(Row row)
+        {
+            if (row.portraitType != 0 && row.portraitImg != null && row.portraitImg.sprite == null)
+                SetPortraitSprite(row, row.portraitType);
+            if (row.nameTmp != null) row.nameTmp.color = new Color(1f, .78f, .3f, 1f);
+            if (row.hpBar != null) row.hpBar.SetActive(false);
+            if (row.hpTmp != null)
+            {
+                row.hpTmp.text = "spawnable";
+                row.hpTmp.color = new Color(1f, .85f, .45f, 1f);
+                row.hpTmp.alignment = TextAlignmentOptions.Left;
+            }
+        }
+
+        private Row CreateRow(ushort ptype)
+        {
             var go = new GameObject("BossRow");
             go.transform.SetParent(listRoot.transform, false);
             var rt = go.AddComponent<RectTransform>();
@@ -286,9 +446,6 @@ namespace BornAgainM
             rowBg.raycastTarget = false;
 
             var row = new Row { go = go };
-
-            ushort ptype = 0;
-            try { if (boss.Definition != null) ptype = boss.Definition.Type; } catch { }
             row.portraitType = ptype;
 
             // Portrait: crisp map sprite (GetSprite) in a left-aligned Image, vertically centered.
@@ -447,6 +604,108 @@ namespace BornAgainM
             tmp.enableWordWrapping = false;
             tmp.overflowMode = TextOverflowModes.Ellipsis;
             return tmp;
+        }
+    }
+
+    /// <summary>
+    /// Boss type per boss-marker position, rebuilt on every map load. The game builds
+    /// Map._bossLocations in WorldMapExtensions.LoadMapFile from the map's SpawnZoneChunk entries with
+    /// exactly one EnemyDefinition where MinionRequirement != 0 and no lock (LockKeyType == 0 and
+    /// LockMedallions &lt;= 0), keyed by (Coordinates - Header.ContentCoords), but it stores a generic
+    /// marker type instead of the boss type. The postfix replays that filter to keep the real type.
+    /// </summary>
+    internal static class BossSpawnTable
+    {
+        private static readonly System.Collections.Generic.Dictionary<Vector2Int, ushort> table = new();
+
+        /// <summary>One boss location, in Map._bossLocations order (index = bit of World._activeBosses).</summary>
+        public struct Location { public ushort type; public int locationId; public string region; }
+
+        /// <summary>Region of an area zone: its Label up to the first '-' (the key the game uses for
+        /// Map._majorZones, e.g. "isles-pirates" -> "isles"). Null when the zone has no label.</summary>
+        public static string RegionOf(Il2CppRonin.Model.Files.Map.Chunks.AreaZoneChunk az)
+        {
+            if (az == null) return null;
+            string label = az.Label;
+            if (string.IsNullOrEmpty(label)) return null;
+            int dash = label.IndexOf('-');
+            return dash < 0 ? label : label.Substring(0, dash);
+        }
+
+        /// <summary>Boss locations indexed by bit: real boss type (0 if unresolved) and area zone
+        /// LocationId (Map.GetAreaZone(pos).LocationId, 0 = outside any named zone).</summary>
+        public static readonly System.Collections.Generic.List<Location> Locations = new();
+
+        /// <summary>Incremented on every map load so cached results can be invalidated.</summary>
+        public static int Version { get; private set; }
+
+        /// <summary>Native pointer of the Map the table was built from. LoadMapFile is also called
+        /// outside the game world (DataSyncMenu), so the table is only used when it matches
+        /// World.Instance's map.</summary>
+        public static IntPtr MapPtr { get; private set; }
+
+        [HarmonyLib.HarmonyPatch(typeof(WorldMapExtensions), nameof(WorldMapExtensions.LoadMapFile))]
+        internal static class LoadMapFilePatch
+        {
+            static void Postfix(World world, Il2CppRonin.Model.Files.Map.MapFile mapFile)
+            {
+                try { Build(world, mapFile); }
+                catch (Exception ex) { MelonLogger.Error($"[BossSpawnTable] {ex}"); }
+            }
+        }
+
+        private static void Build(World world, Il2CppRonin.Model.Files.Map.MapFile mapFile)
+        {
+            // Only the game world's map: a load for another World must not overwrite the table.
+            try
+            {
+                var inst = World.Instance;
+                if (inst != null && world != null && inst.Pointer != world.Pointer) return;
+            }
+            catch { }
+            table.Clear();
+            Locations.Clear();
+            Version++;
+            MapPtr = IntPtr.Zero;
+            try { if (world?._map != null) MapPtr = world._map.Pointer; } catch { }
+            if (mapFile == null || mapFile.Header == null || mapFile.Chunks == null) return;
+            var origin = mapFile.Header.ContentCoords;
+            var chunks = mapFile.Chunks;
+            for (int c = 0; c < chunks.Length; c++)
+            {
+                var chunk = chunks[c]?.TryCast<Il2CppRonin.Model.Files.Map.Chunks.SpawnZoneChunk>();
+                if (chunk == null || chunk.SpawnZones == null) continue;
+                var zones = chunk.SpawnZones;
+                for (int i = 0; i < zones.Length; i++)
+                {
+                    var zone = zones[i];
+                    var types = zone.SpawnZone.EntityTypes;
+                    if (types == null || types.Length != 1) continue;
+                    var def = LibraryExtensions.GetDefinition(types[0])?.TryCast<Il2CppRonin.Model.Definitions.EnemyDefinition>();
+                    if (def == null) continue;
+                    if (def.LockKeyType != 0 || def.LockMedallions > 0) continue;   // locked: other list
+                    if (def.MinionRequirement == 0) continue;                         // not a boss spawn
+                    var co = zone.Coordinates;
+                    table[new Vector2Int(co.X - origin.X, co.Y - origin.Y)] = types[0];
+                }
+            }
+
+            // Walk the dictionary the game just filled, in its order (= bit order), and attach the
+            // real boss type and the area zone of each location.
+            try
+            {
+                var map = world?._map;
+                var dict = map?._bossLocations;
+                if (dict != null)
+                    foreach (var kv in dict)
+                    {
+                        ushort type = table.TryGetValue(kv.Key, out var t) ? t : (ushort)0;
+                        int loc = 0; string region = null;
+                        try { var az = map.GetAreaZone(kv.Key); if (az != null) { loc = az.LocationId; region = RegionOf(az); } } catch { }
+                        Locations.Add(new Location { type = type, locationId = loc, region = region });
+                    }
+            }
+            catch { }
         }
     }
 }
