@@ -50,8 +50,3 @@ Targets `net6.0`. The project references the game's Il2Cpp assemblies from a loc
 2. In `BornAgainM.csproj`, set the single `<GameDir>` property to your own Born Again install path. Every
    reference (and the post-build copy to `Mods`) derives from it.
 3. `dotnet build -c Release`. The post-build step copies the DLL into `<GameDir>\Mods`.
-
-MelonLoader itself has no built-in csproj generator, but the third-party
-[MelonLoader Wizard](https://marketplace.visualstudio.com/items?itemName=masterhell.melonloader-vscode-wizard)
-VS Code extension can scaffold a mod project with the references wired up if you prefer not to edit the
-csproj by hand.
