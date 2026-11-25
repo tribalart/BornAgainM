@@ -147,7 +147,7 @@ namespace BornAgainM
             cv.renderMode = RenderMode.ScreenSpaceOverlay;
             cv.sortingOrder = 9998;
             var scaler = canvas.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
+            UiScale.Apply(scaler);
             canvas.AddComponent<GraphicRaycaster>().blockingObjects = GraphicRaycaster.BlockingObjects.None;
 
             panel = new GameObject("Panel");
@@ -155,7 +155,7 @@ namespace BornAgainM
             var pr = panel.AddComponent<RectTransform>();
             pr.anchorMin = pr.anchorMax = new Vector2(0, 1);
             pr.pivot = new Vector2(0, 1);
-            pr.anchoredPosition = new Vector2(START_X, -(Screen.height / 4f));
+            pr.anchoredPosition = new Vector2(START_X, -(UiScale.REF_H / 4f));
             pr.sizeDelta = new Vector2(PANEL_W, ROW_H + PAD * 2);
             // Transparent panel: each row paints its own solid background.
             panelBg = panel.AddComponent<Image>();

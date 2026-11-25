@@ -362,7 +362,7 @@ namespace BornAgainM
             cv.renderMode = RenderMode.ScreenSpaceOverlay;
             cv.sortingOrder = 9996;
             var scaler = canvas.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ConstantPixelSize;
+            UiScale.Apply(scaler);
             canvas.AddComponent<GraphicRaycaster>().blockingObjects = GraphicRaycaster.BlockingObjects.None;
 
             bossPanel = MakePanel("BossPanel", new Vector2(-10, TOP_Y), BOSS_W, out bossList, "BOSS DAMAGE", withReset: true);
@@ -439,7 +439,7 @@ namespace BornAgainM
             var cv = buttonCanvas.AddComponent<Canvas>();
             cv.renderMode = RenderMode.ScreenSpaceOverlay;
             cv.sortingOrder = 10000;
-            buttonCanvas.AddComponent<CanvasScaler>();
+            UiScale.Apply(buttonCanvas.AddComponent<CanvasScaler>());
             buttonCanvas.AddComponent<GraphicRaycaster>().blockingObjects = GraphicRaycaster.BlockingObjects.None;
 
             toggleButton = new GameObject("BossDamageBtn");
