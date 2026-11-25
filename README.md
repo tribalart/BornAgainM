@@ -22,14 +22,6 @@ not meant to break the game, affect anyone's journey, or gain an unfair advantag
   summary to the game chat. (use on town dummy)
 - **Bank sorter** — groups identical items by swapping bank slots.
 
-## Notes
-
-- From what I understand, the client handles **Damage Over Time** as a world message without an `ownerId`,
-  which makes it impossible to attribute DoT damage correctly on the client side.
-- Secondary stats (crit / block / true damage / cooldown) are intentionally **not** shown for remote players:
-  the game's total also folds in crystals, whose crystal path is local profile data never present in the
-  networked entity state, so an exact total cannot be reconstructed for someone else.
-
 ## Install
 
 1. Install [MelonLoader](https://melonwiki.xyz/#/) on Born Again (IL2CPP, net6) and run the game once so it
@@ -49,3 +41,11 @@ Targets `net6.0`. The project references the game's Il2Cpp assemblies from a loc
 2. In `BornAgainM.csproj`, set the single `<GameDir>` property to your own Born Again install path. Every
    reference (and the post-build copy to `Mods`) derives from it.
 3. `dotnet build -c Release`. The post-build step copies the DLL into `<GameDir>\Mods`.
+
+## Notes
+
+- From what I understand, the client handles **Damage Over Time** as a world message without an `ownerId`,
+  which makes it impossible to attribute DoT damage correctly on the client side.
+- Secondary stats (crit / block / true damage / cooldown) are intentionally **not** shown for remote players:
+  the game's total also folds in crystals, whose crystal path is local profile data never present in the
+  networked entity state, so an exact total cannot be reconstructed for someone else.
