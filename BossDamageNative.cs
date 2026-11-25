@@ -22,7 +22,7 @@ namespace BornAgainM
     ///
     /// It hooks <c>WorldObject.HitBy</c>: the patched instance is the entity receiving the hit and
     /// <c>__result</c> is the real damage dealt (post-mitigation). When that entity is a known boss
-    /// (by name), the attacker is resolved from <c>LiveAttack.OwnerId</c> and the hit is recorded
+    /// (by name, list built from the definitions: <see cref="BossDefs"/>), the attacker is resolved from <c>LiveAttack.OwnerId</c> and the hit is recorded
     /// under that boss instance, that attacker, and the attack type. Attacker names are resolved
     /// from the live characters, with a pending queue for hits whose name is not available yet.
     /// </summary>
@@ -57,18 +57,6 @@ namespace BornAgainM
 
         internal static readonly Dictionary<uint, BossInstance> Bosses = new();
         internal static string LocalPlayerName = "";
-
-        // Known boss names; only damage dealt to these entities is tracked.
-        internal static readonly HashSet<string> BossNames = new()
-        {
-            "Phoenix","Hahn","Forest Guardian","Mountain Dragon","Yoku-Ba","Bhognin","Umbra",
-            "Vika-Minci","Grug-Mant","Pirate Captain","Kitsune Momoko","Giant Boar","Mysterious Head",
-            "Lord Hammurabi","Lord Cicero","Queoti Queen","Sand Eater","Pogger Beast Tamer",
-            "Giant Gloop","Saint Klaus","Wapo Helmsman","Gorilla King","Akuji Mozuki","Kobukin King",
-            "Akuji Saikami","Hill Giant Shaman","Dokai Chancellor","Stone Giant","Lady Valeria",
-            "Tiko Tikatu","Shroom Conglomerate","Onyx","Bullfrog Shaman","Hydra Head",
-            "Mounted Knight","Djinn","Bubra Elephant","Mannah the Malevolent"
-        };
 
         // Attacker name resolution.
         private static readonly Dictionary<uint, Character> charCache = new();
@@ -201,7 +189,7 @@ namespace BornAgainM
                 var entity = __instance.TryCast<Il2Cpp.Entity>();
                 if (entity == null) return;
                 string bossName = null; try { bossName = entity.EntityName; } catch { }
-                if (string.IsNullOrEmpty(bossName) || !BossNames.Contains(bossName)) return;
+                if (string.IsNullOrEmpty(bossName) || !BossDefs.IsBossName(bossName)) return;
 
                 uint bossId = entity.EntityId;
 

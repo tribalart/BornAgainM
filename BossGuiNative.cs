@@ -210,6 +210,7 @@ namespace BornAgainM
                     Entity boss;
                     try { boss = bosses.ElementAt(i); } catch { continue; }
                     if (boss == null) continue;
+                    if (BossDefs.IsClone(boss)) continue;   // boss clones (Clone flag), e.g. Kitsune's
                     uint id;
                     try { id = boss.EntityId; } catch { continue; }
                     present.Add(id);

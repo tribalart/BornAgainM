@@ -43,6 +43,7 @@
 		<Compile Include="BossDamageNative.cs" />
 		<Compile Include="DpsMeter.cs" />
 		<Compile Include="Core.cs" />
+		<Compile Include="BossDefs.cs" />
 	</ItemGroup>
 	
 	<Target Name="PostBuild" AfterTargets="PostBuildEvent">

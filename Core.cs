@@ -59,7 +59,12 @@ namespace BornAgainM
             bossMonitor?.Update();
             onlinePlayers?.Update();
             bossDamage?.Update();
-            dpsMeter?.Update();
+            dpsMeter?.Update();        }
+
+        /// <summary>GameScene initialized (definitions are loaded by then): build the boss name list (once).</summary>
+        public override void OnSceneWasInitialized(int buildIndex, string sceneName)
+        {
+            if (sceneName == "GameScene") BossDefs.TryBuild();   // TryBuild returns if the list is already built
         }
 
         public override void OnGUI()
