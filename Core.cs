@@ -6,7 +6,7 @@ using Il2CppZero.Game.Shared;
 using HarmonyLib;
 using System.Threading.Tasks;
 
-[assembly: MelonInfo(typeof(BornAgainM.Core), "BornAgainM", "2.0.9", "Toi")]
+[assembly: MelonInfo(typeof(BornAgainM.Core), "BornAgainM", "2.0.10", "Toi")]
 [assembly: MelonGame("Unnamed Studios", "Born Again")]
 
 namespace BornAgainM
