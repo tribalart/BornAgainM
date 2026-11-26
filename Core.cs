@@ -23,6 +23,7 @@ namespace BornAgainM
         private OnlinePlayersNative onlinePlayers;  // native online-players overlay (OnlinePlayersNative.cs)
         private DpsMeter dpsMeter;                   // personal DPS meter (DpsMeter.cs)
         private BossDamageNative bossDamage;         // boss damage meter (BossDamageNative.cs)
+        private LootMapNative lootMap;               // boss map (LootMapNative.cs)
 
         /// <summary>Create the features and apply the Harmony patches on load.</summary>
         public override void OnInitializeMelon()
@@ -35,6 +36,7 @@ namespace BornAgainM
             sortBank = new SortBank();
             dpsMeter = new DpsMeter();
             bossDamage = new BossDamageNative();
+            lootMap = new LootMapNative();
 
             var harmony = new HarmonyLib.Harmony("com.bornagainm.mod");
             harmony.PatchAll();
@@ -59,7 +61,9 @@ namespace BornAgainM
             bossMonitor?.Update();
             onlinePlayers?.Update();
             bossDamage?.Update();
-            dpsMeter?.Update();        }
+            dpsMeter?.Update();
+            lootMap?.Update();
+        }
 
         /// <summary>GameScene initialized (definitions are loaded by then): build the boss name list (once).</summary>
         public override void OnSceneWasInitialized(int buildIndex, string sceneName)

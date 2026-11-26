@@ -44,6 +44,8 @@
 		<Compile Include="DpsMeter.cs" />
 		<Compile Include="Core.cs" />
 		<Compile Include="BossDefs.cs" />
+		<Compile Include="LootMapNative.cs" />
+		<Compile Include="LootTableData.cs" />
 	</ItemGroup>
 	
 	<Target Name="PostBuild" AfterTargets="PostBuildEvent">
