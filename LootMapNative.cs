@@ -26,15 +26,12 @@ namespace BornAgainM
         private static readonly Color32 BADGE_FILL = new(10, 12, 20, 200), BADGE_RING = new(255, 215, 60, 255);
         private static Sprite badgeSprite;
         private const float BTN_Y = 311f, BTN_W = 110f; // right edge, above the other overlay buttons
-        private const float REFRESH_INTERVAL = 1f;
 
         private GameObject canvas, buttonCanvas, toggleButton, panel, mapArea, lootStrip;
         private TextMeshProUGUI stripHint;
         private RawImage mapImage;
         private readonly List<GameObject> icons = new();
         private bool uiBuilt, visible;
-        private float lastRefresh = -999f;
-        private int builtVersion = -1;
         private Texture builtTexture;
         private TMP_FontAsset gameFont;
         private Material gameFontMat;
@@ -43,22 +40,7 @@ namespace BornAgainM
         {
             try
             {
-                if (!worldLoadTried)
-                {
-                    bool loaded = false;
-                    try { loaded = Il2Cpp.Library.Loaded; } catch { }
-                    if (loaded)
-                    {
-                        try { LoadWorldMap(); }
-                        catch (Exception ex) { MelonLogger.Error($"[LootMapNative] overworld.map: {ex}"); }
-                    }
-                }
                 if (!EnsureUI()) return;
-                if (visible && Time.time - lastRefresh >= REFRESH_INTERVAL)
-                {
-                    lastRefresh = Time.time;
-                    Refresh();
-                }
                 if (visible && Input.GetMouseButtonDown(0) && !IsOver(panel) && !IsOver(toggleButton))
                     HidePanel();   // click outside the frame (the toggle button handles its own click)
                 if (visible) UpdateHover();
@@ -70,6 +52,13 @@ namespace BornAgainM
         {
             if (uiBuilt) return canvas != null;
             if (World.Instance == null) return false;
+            // The World can exist before the Library: without the definitions the map has no colors and no bosses.
+            bool loaded = false;
+            try { loaded = Il2Cpp.Library.Loaded; } catch { }
+            if (!loaded) return false;
+            // Read the world map once, before the button exists.
+            try { LoadWorldMap(); }
+            catch (Exception ex) { MelonLogger.Error($"[LootMapNative] overworld.map: {ex}"); }
             try { var fp = Il2Cpp.Library.Font.Main; gameFont = fp.Font; gameFontMat = fp.Material; } catch { }
             BuildCanvas();
             BuildButton();
@@ -177,7 +166,7 @@ namespace BornAgainM
             if (!visible) CloseTooltip();
             if (canvas) canvas.SetActive(visible);
             if (toggleButton) toggleButton.GetComponent<Image>().color = visible ? ActiveColor : IdleColor;
-            if (visible) { SideOverlays.CloseExcept(this); ClearLoot(); lastRefresh = Time.time; Refresh(); }
+            if (visible) { SideOverlays.CloseExcept(this); ClearLoot(); Refresh(); }
         }
 
         public void HidePanel()
@@ -199,12 +188,9 @@ namespace BornAgainM
         private const string WORLD_MAP_FILE = "overworld.map";
         private static Texture2D worldTex;
         private static readonly List<(Vector2Int pos, ushort type)> bossSpawns = new();
-        private static int worldVersion;
-        private static bool worldLoadTried;
 
         private static void LoadWorldMap()
         {
-            worldLoadTried = true;
             Il2CppRonin.Model.Files.Map.MapFile mapFile;
             var stream = Il2Cpp.Data.OpenRead(WORLD_MAP_FILE);
             try { mapFile = Il2CppRonin.Model.Files.Map.MapFile.Read(stream); }
@@ -269,7 +255,6 @@ namespace BornAgainM
                     if (types.Length == 1 && IsMapBoss(types[0])) bossSpawns.Add((pos, types[0]));
                 }
             }
-            worldVersion++;
             foreach (var (type, pos) in ExtraBosses)
                 if (!bossSpawns.Exists(b => b.type == type)) bossSpawns.Add((pos, type));
             var names = new List<string>();
@@ -315,7 +300,6 @@ namespace BornAgainM
             { filterMode = FilterMode.Point, wrapMode = TextureWrapMode.Clamp, hideFlags = HideFlags.HideAndDontSave };
             worldTex.SetPixels32(worldPixels);
             worldTex.Apply();
-            worldVersion++;
             return worldTex;
         }
 
@@ -338,14 +322,12 @@ namespace BornAgainM
             }
         }
 
-        /// <summary>Rebuild the map image and the boss icons when the captured world map changed.</summary>
+        /// <summary>Build the map image and the boss icons once, on the first open after the map is loaded.</summary>
         private void Refresh()
         {
             var tex = EnsureWorldTexture();
-            if (tex == null) return;
-            if (tex == builtTexture && worldVersion == builtVersion) return;
+            if (tex == null || tex == builtTexture) return;
             builtTexture = tex;
-            builtVersion = worldVersion;
 
             // Fit the texture in the map area, keeping its aspect (1 texel = 1 tile, +1 margin each side).
             var area = mapArea.GetComponent<RectTransform>().rect;
