@@ -49,6 +49,3 @@ Targets `net6.0`. The project references the game's Il2Cpp assemblies from a loc
 
 - From what I understand, the client handles **Damage Over Time** as a world message without an `ownerId`,
   which makes it impossible to attribute DoT damage correctly on the client side.
-- Secondary stats (crit / block / true damage / cooldown) are intentionally **not** shown for remote players:
-  the game's total also folds in crystals, whose crystal path is local profile data never present in the
-  networked entity state, so an exact total cannot be reconstructed for someone else.
