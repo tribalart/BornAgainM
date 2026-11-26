@@ -1095,9 +1095,10 @@ namespace BornAgainM
             foreach (var t in types)
             {
                 Sprite sp = null;
+                ObjectDefinition def = null;
                 try
                 {
-                    var def = LibraryExtensions.GetDefinition(t);
+                    def = LibraryExtensions.GetDefinition(t);
                     if (def != null) sp = DefinitionExtensions.GetDisplaySprite(def);
                 }
                 catch { }
@@ -1113,11 +1114,26 @@ namespace BornAgainM
                     irt.anchorMin = irt.anchorMax = new Vector2(0, .5f); irt.pivot = new Vector2(0, .5f);
                     irt.sizeDelta = new Vector2(24, 24);
                     img = ic.AddComponent<Image>();
-                    img.preserveAspect = true; img.raycastTarget = false; img.material = null;
+                    img.preserveAspect = true; img.raycastTarget = true; img.material = null;
+                    // Native blessing tooltip: TooltipActivator -> BlessingTooltipSource -> BlessingIcon.Blessing.
+                    // The BlessingIcon is disabled so its click/drag handlers (remove, context menu) never fire;
+                    // it only carries the definition read by the tooltip source.
+                    try
+                    {
+                        var bi = ic.AddComponent<BlessingIcon>();
+                        bi.Image = img;
+                        bi.enabled = false;
+                        var src = ic.AddComponent<BlessingTooltipSource>();
+                        src.BlessingIcon = bi;
+                        var act = ic.AddComponent<TooltipActivator>();
+                        act.Source = src;
+                    }
+                    catch (Exception ex) { MelonLogger.Warning($"[OnlinePlayersNative] blessing tooltip: {ex.Message}"); }
                     blessingRow.icons.Add(img);
                 }
                 img.rectTransform.anchoredPosition = new Vector2(x, 0);
                 img.sprite = sp; img.color = Color.white;
+                try { var bi = img.GetComponent<BlessingIcon>(); if (bi != null) bi.Blessing = def; } catch { }
                 x += 28f;
                 idx++;
             }
