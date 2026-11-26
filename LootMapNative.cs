@@ -18,7 +18,7 @@ namespace BornAgainM
     /// </summary>
     internal class LootMapNative : ISideOverlay
     {
-        private const float PANEL_W = 1140f, PANEL_H = 760f, HEADER_H = 26f, PAD = 8f;
+        private const float PANEL_W = 1140f, PANEL_H = 760f, HEADER_H = 26f, FOOTER_H = 16f, PAD = 8f;
         private const float STRIP_W = 320f;             // loot strip on the right of the map, same frame
         private const float BADGE = 34.5f;             // boss badge diameter (canvas units), same for every boss
         private const float ICON_BOX = 25.3f;          // the boss sprite is fitted in this square inside the badge
@@ -110,17 +110,26 @@ namespace BornAgainM
             mapArea.transform.SetParent(panel.transform, false);
             var ar = mapArea.AddComponent<RectTransform>();
             ar.anchorMin = Vector2.zero; ar.anchorMax = Vector2.one;
-            ar.offsetMin = new Vector2(PAD, PAD); ar.offsetMax = new Vector2(-(PAD + STRIP_W + PAD), -(HEADER_H + PAD));
+            ar.offsetMin = new Vector2(PAD, PAD + FOOTER_H); ar.offsetMax = new Vector2(-(PAD + STRIP_W + PAD), -(HEADER_H + PAD));
 
             // Loot strip: right column of the panel; shows the last clicked boss until another is clicked.
             lootStrip = new GameObject("LootStrip");
             lootStrip.transform.SetParent(panel.transform, false);
             var sr = lootStrip.AddComponent<RectTransform>();
             sr.anchorMin = new Vector2(1, 0); sr.anchorMax = new Vector2(1, 1); sr.pivot = new Vector2(1, 1);
-            sr.offsetMin = new Vector2(-(PAD + STRIP_W), PAD); sr.offsetMax = new Vector2(-PAD, -(HEADER_H + PAD));
+            sr.offsetMin = new Vector2(-(PAD + STRIP_W), PAD + FOOTER_H); sr.offsetMax = new Vector2(-PAD, -(HEADER_H + PAD));
             var simg = lootStrip.AddComponent<Image>();
             simg.color = new Color(.03f, .04f, .07f, .95f);
             stripHint = MakeTmp(lootStrip.transform, 13, Color.gray, "Click a boss to see its loot");
+
+            // Footer credit, along the bottom edge of the panel.
+            var ftr = new GameObject("Footer");
+            ftr.transform.SetParent(panel.transform, false);
+            var fr = ftr.AddComponent<RectTransform>();
+            fr.anchorMin = Vector2.zero; fr.anchorMax = new Vector2(1, 0);
+            fr.pivot = new Vector2(.5f, 0); fr.anchoredPosition = new Vector2(0, PAD / 2);
+            fr.sizeDelta = new Vector2(0, FOOTER_H);
+            MakeTmp(ftr.transform, 11, new Color(.7f, .7f, .75f, 1f), "Based on the loot table by Wys (Discord)");
 
             var mi = new GameObject("MapTexture");
             mi.transform.SetParent(mapArea.transform, false);
