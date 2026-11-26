@@ -18,21 +18,23 @@ Fichiers : `LootMapNative.cs` (carte + bandeau de loot + infobulle), `LootTableD
 ## Données codées en dur (à revoir après une mise à jour du jeu)
 | Où | Quoi |
 |---|---|
-| `LootTableData.Drops` | boss type → sacs → item types. Index 0 Mythic Chest, 1 Rare Chest, 2 Pet Basket, 3 Hat Bag, 4 Crystal Box, 5 (optionnel) Exalted Chest. |
-| `LootMapNative.TIER_BAGS` | ContainerDefinition de chaque sac : 9741, 9737, 9739, 9738, 9735, 9742. |
-| `LootMapNative.TIER_ORDER` | ordre d'affichage : Exalted puis 1..5. |
+| `LootTableData.Drops` | boss type → liste d'item types (le sac n'est **pas** stocké, il est calculé en jeu). |
+| `LootMapNative.TIER_BAGS` | ContainerDefinition de chaque sac : 0 Mythic 9741, 1 Rare 9737, 2 Pet Basket 9739, 3 Hat Bag 9738, 4 Crystal Box 9735, 5 Exalted 9742, 6 Epic 9736. |
+| `LootMapNative.TIER_ORDER` | ordre d'affichage : Exalted, Mythic, Epic, Rare, Pet, Hat, Crystal. |
 | `LootMapNative.SharedSpawns` | spawner de la carte → boss affichés (par **nom** de définition) : `Peaks Spawner` → Grug-Mant + Vika-Minci ; `Hydra` → Hydra Head. |
 | `LootMapNative.ExtraBosses` | boss absents des SpawnZones (« event »), placés à la main en tuiles : Djinn (290,322), Mysterious Head (563,315), Giant Boar (398,303). |
 | `LootMapNative.DungeonBosses` | colonne en haut à gauche : Lord Hammurabi, Lord Cicero, Lady Valeria, Mannah, Boggo. |
 
-## Règle des sacs (vérifiée sur toute la table)
-Le sac se déduit de la rareté (`ItemDefinition.Rarity`) : Exalted → Exalted Chest, Mythic → Mythic Chest,
-Rare → Rare Chest ; sinon par type : pet → Pet Basket, chapeau → Hat Bag, cristal → Crystal Box.
-Un objet qui ne respecte pas cette règle dans la table est probablement une erreur de saisie.
+## Règle des sacs (calculée en jeu : `LootMapNative.BagOf`)
+Rareté (`ItemDefinition.Rarity`) : Exalted → Exalted Chest, Mythic → Mythic Chest, Epic → Epic Chest,
+Rare → Rare Chest ; sinon par type : `PetDefinition` → Pet Basket, `HatDefinition` → Hat Bag, le reste
+(cristaux) → Crystal Box. Calcul fait une seule fois pour toute la table (cache `lootRows`, ainsi que
+sprites et noms) ; le log signale les objets non-cristaux tombés dans la Crystal Box
+(`[LootMapNative] loot table: ...`).
 
 ## Ajouter / corriger un drop
 1. Retrouver l'ID (type) de l'objet à partir de son nom en jeu.
-2. Choisir le sac selon la règle ci-dessus, éditer `LootTableData.cs` (garder le nom en commentaire).
+2. L'ajouter à la liste du boss dans `LootTableData.cs` (garder le nom en commentaire) ; le sac est automatique.
 3. Fermer le jeu (la DLL est verrouillée) puis `dotnet build -c Release`.
 
 ## Placer un boss à la main (ExtraBosses)

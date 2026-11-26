@@ -7,6 +7,7 @@ using UnityEngine.Events;
 using UnityEngine.UI;
 using Il2Cpp;
 using Il2CppTMPro;
+using Il2CppRonin.Model.Definitions;
 
 namespace BornAgainM
 {
@@ -351,7 +352,7 @@ namespace BornAgainM
             foreach (var (p, type) in bossSpawns)
             {
                 Sprite sp = null;
-                try { sp = DefinitionExtensions.GetDisplaySprite(LibraryExtensions.GetDefinition(type)); } catch { }
+                sp = SpriteOf(type);
                 if (sp == null) continue;
                 // Texel (x+1, y+1) holds tile (x, y); its center sits at (x+1.5, y+1.5) texels from the bottom-left.
                 var pos = new Vector2((p.x + 1.5f) * s - mr.sizeDelta.x / 2f, (p.y + 1.5f) * s - mr.sizeDelta.y / 2f);
@@ -362,7 +363,7 @@ namespace BornAgainM
             for (int i = 0; i < DungeonBosses.Length; i++)
             {
                 Sprite sp = null;
-                try { sp = DefinitionExtensions.GetDisplaySprite(LibraryExtensions.GetDefinition(DungeonBosses[i])); } catch { }
+                sp = SpriteOf(DungeonBosses[i]);
                 if (sp == null) continue;
                 var go = MakeIcon(sp, Vector2.zero, DungeonBosses[i]);
                 go.transform.SetParent(mapArea.transform, false);
@@ -414,7 +415,7 @@ namespace BornAgainM
         private static readonly Color[] TIER_COLORS =
         {
             new(.45f, .7f, 1f, 1f), new(1f, .6f, .75f, 1f), new(.55f, .9f, .45f, 1f), new(1f, .45f, .4f, 1f), new(.95f, .5f, .85f, 1f),
-            new(.75f, .5f, 1f, 1f),
+            new(.75f, .5f, 1f, 1f), new(.6f, .45f, .95f, 1f),
         };
 
         /// <summary>Spawns shared by several bosses: the map file holds a single spawner entry but all of
@@ -429,9 +430,7 @@ namespace BornAgainM
         /// <summary>Bosses shown for a clicked spawn type.</summary>
         private static ushort[] BossesOf(ushort type)
         {
-            string name = null;
-            try { name = LibraryExtensions.GetDefinition(type)?.Name; } catch { }
-            return name != null && SharedSpawns.TryGetValue(name, out var group) ? group : new[] { type };
+            return SharedSpawns.TryGetValue(NameOf(type), out var group) ? group : new[] { type };
         }
 
         private GameObject lootPanel;                 // content of the loot strip (rebuilt on each boss click)
@@ -474,13 +473,12 @@ namespace BornAgainM
             float y = -LOOT_PAD;
             foreach (var boss in bosses)
             {
-                var bdef = LibraryExtensions.GetDefinition(boss);
-                Sprite bsp = null;
-                try { bsp = DefinitionExtensions.GetDisplaySprite(bdef); } catch { }
+                var bsp = SpriteOf(boss);
                 if (bsp != null) LootIcon(LOOT_PAD, y, LOOT_HEAD, bsp);
-                LootText(LOOT_PAD + LOOT_HEAD + 8, y, STRIP_W - LOOT_HEAD - 3 * LOOT_PAD, LOOT_HEAD, bdef?.Name ?? boss.ToString(), 17, new Color(1f, .85f, .3f, 1f));
+                LootText(LOOT_PAD + LOOT_HEAD + 8, y, STRIP_W - LOOT_HEAD - 3 * LOOT_PAD, LOOT_HEAD, NameOf(boss), 17, new Color(1f, .85f, .3f, 1f));
                 y -= LOOT_HEAD + LOOT_GAP;
-                if (!LootTableData.Drops.TryGetValue(boss, out var tiers))
+                var tiers = RowsOf(boss);
+                if (tiers == null)
                 {
                     LootText(LOOT_PAD, y, LOOT_NAME_W, LOOT_ROW, "No loot data", 13, Color.gray);
                     y -= LOOT_ROW + LOOT_PAD;
@@ -488,19 +486,17 @@ namespace BornAgainM
                 }
                 foreach (int t in TIER_ORDER)
                 {
-                    if (t >= tiers.Length) continue;
-                    if (tiers[t] == null || tiers[t].Length == 0) continue;
+                    if (tiers[t].Count == 0) continue;
                     float x = LOOT_PAD;
                     TierMarker(x, y - (LOOT_ROW - LOOT_ICON) / 2f, t);
                     x += LOOT_ICON + LOOT_GAP * 3;
                     // One line, no wrapping: shrink the icons when the row would overflow the strip.
-                    int n = tiers[t].Length;
+                    int n = tiers[t].Count;
                     float avail = STRIP_W - x - LOOT_PAD;
                     float icon = Mathf.Min(LOOT_ICON, avail / n - LOOT_GAP);
                     foreach (var item in tiers[t])
                     {
-                        Sprite isp = null;
-                        try { isp = DefinitionExtensions.GetDisplaySprite(LibraryExtensions.GetDefinition(item)); } catch { }
+                        var isp = SpriteOf(item);
                         if (isp != null)
                         {
                             var rt = LootIcon(x, y - (LOOT_ROW - icon) / 2f, icon, isp);
@@ -590,15 +586,87 @@ namespace BornAgainM
         }
 
         /// <summary>Container (ContainerDefinition) of each bag tier 1..5: Mythic Chest, Rare Chest, Pet Basket,
-        /// Hat Bag, Crystal Box; index 5 is the Exalted Chest (dungeon lords), shown first (TIER_ORDER).</summary>
-        private static readonly ushort[] TIER_BAGS = { 9741, 9737, 9739, 9738, 9735, 9742 };
-        private static readonly int[] TIER_ORDER = { 5, 0, 1, 2, 3, 4 };
+        /// Hat Bag, Crystal Box; 5 Exalted Chest, 6 Epic Chest. Display order: TIER_ORDER.</summary>
+        private static readonly ushort[] TIER_BAGS = { 9741, 9737, 9739, 9738, 9735, 9742, 9736 };
+        private static readonly int[] TIER_ORDER = { 5, 0, 6, 1, 2, 3, 4 };
+        private const int BAG_MYTHIC = 0, BAG_RARE = 1, BAG_PET = 2, BAG_HAT = 3, BAG_CRYSTAL = 4, BAG_EXALTED = 5, BAG_EPIC = 6;
+
+        // Caches. The loot table and the game definitions do not change while playing, so the bag of each item,
+        // the grouped rows of each boss and the sprites / names are resolved once and reused on every click.
+        private static Dictionary<ushort, List<ushort>[]> lootRows;
+        private static readonly Dictionary<ushort, Sprite> spriteCache = new();
+        private static readonly Dictionary<ushort, string> nameCache = new();
+
+        private static Sprite SpriteOf(ushort type)
+        {
+            if (spriteCache.TryGetValue(type, out var sp) && sp != null) return sp;
+            sp = null;
+            try { sp = DefinitionExtensions.GetDisplaySprite(LibraryExtensions.GetDefinition(type)); } catch { }
+            spriteCache[type] = sp;
+            return sp;
+        }
+
+        private static string NameOf(ushort type)
+        {
+            if (nameCache.TryGetValue(type, out var n)) return n;
+            try { n = LibraryExtensions.GetDefinition(type)?.Name; } catch { }
+            n ??= type.ToString();
+            nameCache[type] = n;
+            return n;
+        }
+
+        /// <summary>Bag of an item, from the game data: rarity Exalted / Mythic / Epic / Rare gives the chest of
+        /// the same name; otherwise pet -> Pet Basket, hat -> Hat Bag, anything else (crystals) -> Crystal Box.</summary>
+        private static int BagOf(ushort type)
+        {
+            var def = LibraryExtensions.GetDefinition(type);
+            var item = def?.TryCast<ItemDefinition>();
+            if (item != null)
+            {
+                switch (item.Rarity)
+                {
+                    case Il2CppRonin.Model.Enums.Rarity.Exalted: return BAG_EXALTED;
+                    case Il2CppRonin.Model.Enums.Rarity.Mythic: return BAG_MYTHIC;
+                    case Il2CppRonin.Model.Enums.Rarity.Epic: return BAG_EPIC;
+                    case Il2CppRonin.Model.Enums.Rarity.Rare: return BAG_RARE;
+                }
+            }
+            if (def?.TryCast<PetDefinition>() != null) return BAG_PET;
+            if (def?.TryCast<HatDefinition>() != null) return BAG_HAT;
+            return BAG_CRYSTAL;
+        }
+
+        /// <summary>Rows (one list per bag) of a boss, or null when the boss has no loot data. Built for the whole
+        /// table on first use; items that fall into the Crystal Box without being crystals are logged once.</summary>
+        private static List<ushort>[] RowsOf(ushort boss)
+        {
+            if (lootRows == null)
+            {
+                lootRows = new Dictionary<ushort, List<ushort>[]>();
+                var odd = new List<string>();
+                foreach (var kv in LootTableData.Drops)
+                {
+                    var rows = new List<ushort>[TIER_BAGS.Length];
+                    for (int i = 0; i < rows.Length; i++) rows[i] = new List<ushort>();
+                    foreach (var item in kv.Value)
+                    {
+                        int bag = BAG_CRYSTAL;
+                        try { bag = BagOf(item); } catch { }
+                        rows[bag].Add(item);
+                        if (bag == BAG_CRYSTAL && !NameOf(item).EndsWith("Crystal")) odd.Add($"{NameOf(kv.Key)}: {NameOf(item)}");
+                    }
+                    lootRows[kv.Key] = rows;
+                }
+                MelonLogger.Msg($"[LootMapNative] loot table: {lootRows.Count} bosses" +
+                                (odd.Count > 0 ? $"; not crystals but in Crystal Box: {string.Join(", ", odd)}" : ""));
+            }
+            return lootRows.TryGetValue(boss, out var r) ? r : null;
+        }
 
         /// <summary>Bag tier marker: the container's sprite; fallback a square in the tier color with the number.</summary>
         private void TierMarker(float x, float y, int tier)
         {
-            Sprite bag = null;
-            try { bag = DefinitionExtensions.GetDisplaySprite(LibraryExtensions.GetDefinition(TIER_BAGS[tier])); } catch { }
+            var bag = SpriteOf(TIER_BAGS[tier]);
             if (bag != null) { LootIcon(x, y, LOOT_ICON, bag); return; }
 
             var go = new GameObject("Tier");
