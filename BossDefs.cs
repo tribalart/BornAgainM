@@ -5,7 +5,7 @@ namespace BornAgainM
 {
     /// <summary>
     /// Boss names, built once from Library.Definitions: definitions with the Boss and Named flags and
-    /// without Clone (drops gate locks / defense systems and boss clones).
+    /// without Clone (drops gate locks / defense systems and boss clones), minus the gates (types 10200-10300).
     /// </summary>
     internal static class BossDefs
     {
@@ -26,6 +26,8 @@ namespace BornAgainM
                 var def = all[i];
                 if (def == null) continue;
                 uint f = (uint)def.Flags;
+                // Types 10200-10300 are the dungeon gates (Hammurabi's Sanctum, Cicero's Inferno, Valeria's Cathedral).
+                if (def.Type >= 10200 && def.Type <= 10300) continue;
                 if ((f & boss) != 0 && (f & named) != 0 && (f & clone) == 0 && !string.IsNullOrEmpty(def.Name))
                     names.Add(def.Name);
             }
