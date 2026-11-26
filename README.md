@@ -21,9 +21,9 @@ not meant to break the game, affect anyone's journey, or gain an unfair advantag
 - **Personal DPS meter** — toggle with `NumPad +`; it records your own attacks for 20 seconds and posts a
   summary to the game chat. (use on town dummy)
 - **Bank sorter** — groups identical items by swapping bank slots.
-- **Boss Map** — an interactive world map, available from anywhere (even in town), showing every boss at its
-  spawn location, plus the dungeon lords. Click a boss to see its loot table, sorted by chest, and hover an
-  item for its native in-game tooltip.
+- **Boss Map** — an interactive world map showing every boss at its spawn location, plus the dungeon
+  lords. Click a boss to see its loot table, sorted by chest, and hover an item for its native in-game tooltip.
+  Loot tables are based on the information currently available and may be incomplete.
 
 ## Install
 
